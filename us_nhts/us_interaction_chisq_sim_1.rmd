@@ -1,0 +1,1181 @@
+---
+title: "interaction_model"
+author: "dawon"
+date: "2025-04-20"
+output: html_document
+---
+
+# Categorical variable transformation
+```{python include=FALSE}
+import pandas as pd
+import biogemedld dddd
+import biogeme.version as ver
+
+# Load Data
+file_path = r"C:\Users\ohdaw\OneDrive - Harvard University\tu_data\us_nhts\us_data_reduced_hh_0to9_1_dropna.csv"
+data = pd.read_csv(file_path)
+```
+
+```{python}
+print(data.columns.tolist())
+```
+```{python}
+# Count NaN values for each variable in the list
+nan_counts = data.isna().sum()
+print(nan_counts.sort_values(ascending=False))
+```
+
+# Formatting variable
+```{python echo=FALSE}
+# List of variables
+variables = ['JourneyWithChildren', 'PRIMMODE', 'TotalTravelTimeMinutes', 'TotalActivityTimeMinutes', 'TourTimeMinutes', 'PRIMPURP', 'IncHouseh', 'inc_quant', 'HHSIZE', 'NUMADLT', 'NumChld', 'YOUNGCHILD', 'num_5_9', 'numu10inhh', 'num1017inhh', 'OlderSibinHH', 'SingleAinHH', 'acc_0_4', 'acc_5_9', 'PartyNumu10', 'PartyNum1017', 'PartyNum017', 'TourCoupleStatus', 'IsWomen', 'IsWorker', 'TourComplexity', 'R_AGE_IMP']
+```
+
+# Formating for parameters
+```{python, include=FALSE}
+# One-hot encode JourneyWithChildren (0/1 format)
+data = pd.get_dummies(data, columns=["JourneyWithChildren"], prefix="JWC")
+rename_map = {f"JWC_{i}": f"JWC_{i-1}" for i in [1, 2, 3]}
+data = data.rename(columns=rename_map)
+
+# Check transformed dataset
+print(data.head())
+
+print(data.columns.tolist())
+```
+
+# Convert categorical variables
+```{python include=FALSE}
+# Convert categorical variables to integer codes
+categorical_columns = ['PRIMMODE', 'PRIMPURP', 'inc_quant', 'TourCoupleStatus']
+
+data = pd.get_dummies(data, columns=categorical_columns, prefix_sep='_', drop_first=False)
+
+
+# Convert boolean columns to integers (if applicable)
+bool_columns = ["JWC_0", "JWC_1", "JWC_2"]
+data[bool_columns] = data[bool_columns].astype(int)
+
+# Drop rows with missing values (or impute them if needed)
+data = data.dropna() 
+```
+
+```{python}
+# Aggregate trip → tour
+tour_child_counts = (
+  data.groupby("TOURID", as_index=False)["PartyNum1017"]
+      .sum()
+      .rename(columns={"PartyNum1017": "TotalPartyNum1017"})
+)
+
+# Older sibling flag per tour
+tour_child_counts["Oldersibling"] = (tour_child_counts["TotalPartyNum1017"] > 0).astype("Int64")
+
+# Merge back to dT (optional, if you want it on each trip row)
+data = data.merge(tour_child_counts[["TOURID", "Oldersibling"]], on="TOURID", how="left")
+
+print(data["Oldersibling"].value_counts(dropna=False))
+```
+
+
+```{python}
+from scipy.stats import chi2_contingency
+
+# Recreate JourneyWithChildren variable from dummy columns
+data["JourneyWithChildren"] = data[["JWC_0", "JWC_1", "JWC_2"]].idxmax(axis=1).str[-1].astype(int)
+
+# Then perform the chi-square test
+contingency_table = pd.crosstab(data['JourneyWithChildren'], data['Oldersibling'])
+chi2, p, dof, expected = chi2_contingency(contingency_table)
+
+print(contingency_table)
+print(f"\nChi2 = {chi2:.3f}, df = {dof}, p = {p:.4f}")
+
+print("\nChi-square Statistic:", chi2)
+print("Degrees of Freedom:", dof)
+print("P-value:", p) 
+
+print("\nExpected Frequencies:")
+print(pd.DataFrame(expected, index=contingency_table.index, columns=contingency_table.columns))
+```
+
+```{python}
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Create contingency table
+contingency_table = pd.crosstab(data['JourneyWithChildren'], data['Oldersibling'], normalize='index') * 100
+
+# Plot
+contingency_table.plot(kind='bar', stacked=True, color=['#4c72b0', '#dd8452'])
+plt.title('Presence of Older Children (10–17) by JourneyWithChildren Category')
+plt.xlabel('JourneyWithChildren')
+plt.ylabel('Percentage of Tours')
+plt.legend(title='ChildPresence_1017', labels=['No (0)', 'Yes (1)'])
+plt.xticks(rotation=0)
+plt.tight_layout()
+plt.show()
+
+# Create contingency table
+contingency = pd.crosstab(data['JourneyWithChildren'], data['Oldersibling'])
+
+# Plot as heatmap
+sns.heatmap(contingency, annot=True, fmt="d", cmap="Blues")
+plt.title("Joint Distribution: JourneyWithChildren × ChildPresence_1017")
+plt.xlabel("ChildPresence_1017 (Older Children 10–17 Present)")
+plt.ylabel("JourneyWithChildren (Younger Children 0–9 in Tour)")
+plt.show()
+```
+
+
+
+# Import database
+```{python include=FALSE}
+import biogeme.database as db
+import biogeme.biogeme as bio
+from biogeme import models
+from biogeme.expressions import Beta
+from biogeme . expressions import Variable
+
+# Load data into Biogeme database
+#data = data.astype({col: 'int' for col in data.select_dtypes('bool').columns})
+#database = db.Database("US_interaction", data)
+
+# Step 1: Convert nullable Int64 -> standard int64, and bool -> int
+data = data.astype({col: 'int' for col in data.select_dtypes('bool').columns})
+
+# Step 2: Convert any remaining pandas nullable integer types (Int64, Int32, etc.)
+for col in data.columns:
+    if hasattr(data[col], 'dtype') and isinstance(data[col].dtype, pd.api.types.pandas_dtype('Int64').__class__):
+        data[col] = data[col].astype('float64')  # via float to handle any residual NA
+
+# Step 3: Simpler catch-all — convert everything to standard numpy types
+data = data.convert_dtypes(convert_integer=False)  # stop pandas from using Int64
+data = data.astype({
+    col: 'int64' for col in data.select_dtypes(include=['int', 'Int64']).columns
+})
+
+# Step 4: Drop any remaining NaNs to be safe
+data = data.dropna()
+```
+
+# Formatting variable
+```{python include=FALSE}
+PRIMMODE = Variable ("PRIMMODE")
+TotalTravelTimeMinutes = Variable ("TotalTravelTimeMinutes")
+TotalActivityTimeMinutes = Variable ("TotalActivityTimeMinutes")
+TourTimeMinutes = Variable ("TourTimeMinutes")
+PRIMPURP = Variable ("PRIMPURP")
+IncHouseh = Variable ("IncHouseh")
+inc_quant = Variable ("inc_quant")
+TourCoupleStatus = Variable ("TourCoupleStatus")
+SingleAinHH = Variable ("SingleAinHH")
+HHSIZE = Variable ("HHSIZE")
+NUMADLT = Variable ("NUMADLT")
+numu10inhh = Variable ("numu10inhh")
+num1017inhh = Variable ("num1017inhh")
+YOUNGCHILD = Variable ("YOUNGCHILD")
+PartyNum1017 = Variable ("PartyNum1017")
+PartyNumu10 = Variable ("PartyNumu10")
+TourCoupleStatus = Variable ("TourCoupleStatus")
+IsWomen = Variable ("IsWomen")
+IsWorker = Variable ("IsWorker")
+TourComplexity = Variable ("TourComplexity")
+R_AGE_IMP = Variable ("R_AGE_IMP")
+```
+
+# log transforming
+```{python echo=FALSE}
+#from biogeme.expressions import Variable, log
+#import numpy as np
+
+#Define the symbolic log-transformed variable
+#database = db.Database("US_interaction", data)
+#TourTimeMinutes = Variable('TourTimeMinutes')
+#database.DefineVariable('TTM_scaled', log(TourTimeMinutes))
+#TTM_scaled = Variable('TTM_scaled')
+
+# Log transform TravelTimeMinutes using log1p to handle 0s
+#log_ttm = np.log1p(data["TourTimeMinutes"])
+
+from biogeme.expressions import Variable, log
+import numpy as np
+
+# Convert ALL columns to standard numpy-compatible types at once
+# This handles Int64, Float64, boolean, and any other pandas extension types
+data = data.astype({
+    col: 'float64' if data[col].dtype.kind == 'f' or str(data[col].dtype) == 'Float64'
+    else 'int64' if str(data[col].dtype) in ['Int64', 'Int32', 'Int16', 'Int8']
+    else data[col].dtype
+    for col in data.columns
+    if data[col].dtype.name not in ['object', 'category']
+})
+
+# Simpler catch-all that covers everything in one line
+data = data.apply(lambda col: pd.to_numeric(col, errors='ignore')).astype(
+    {col: 'float64' for col in data.select_dtypes(include='number').columns}
+)
+
+data = data.dropna()
+
+# Now create the database
+database = db.Database("US_interaction", data)
+TourTimeMinutes = Variable('TourTimeMinutes')
+database.DefineVariable('TTM_scaled', log(TourTimeMinutes))
+TTM_scaled = Variable('TTM_scaled')
+log_ttm = np.log1p(data["TourTimeMinutes"])
+```
+```{python}
+# Define Variables for every column you use in utilities ---
+varnames = [
+    'TTM_scaled',                     # you already did database.DefineVariable earlier
+    'PRIMMODE_Walk','PRIMMODE_Bicycle','PRIMMODE_Transit','PRIMMODE_Car',
+    'PRIMPURP_Work','PRIMPURP_ShoppingErrands','PRIMPURP_LeisureSocial','PRIMPURP_Chauffeuring',
+    'YOUNGCHILD','NUMADLT','num1017inhh',
+    'TourComplexity',
+    'inc_quant_Q1','inc_quant_Q2','inc_quant_Q3','inc_quant_Q4',
+    'IsWomen','IsWorker',
+    'TourCoupleStatus_Couple','TourCoupleStatus_Single',
+    'Avail_JWC_0','Avail_JWC_1','Avail_JWC_2',
+    'JWC'   # the choice
+]
+# create python variables in the current namespace
+for n in varnames:
+    globals()[n] = Variable(n)
+```
+
+```{python include=FALSE}
+data["Avail_JWC_0"] = 1
+data["Avail_JWC_1"] = 1
+data["Avail_JWC_2"] = 1
+
+database = db.Database("US_mixed", data)
+Avail_JWC_0 = database.variables["Avail_JWC_0"]
+Avail_JWC_1 = database.variables["Avail_JWC_1"]
+Avail_JWC_2 = database.variables["Avail_JWC_2"]
+```
+
+# Parameters to be estimated
+```{python include=FALSE}
+# Define parameters to estimate
+ASC_JWC_0 = Beta('ASC_JWC_0', 0, None, None, 0)
+ASC_JWC_1 = Beta("ASC_JWC_1", 0, None, None, 0) 
+ASC_JWC_2 = Beta("ASC_JWC_2", 0, None, None, 1) 
+
+B_time_0 = Beta("B_time_0", 0, None, None, 0)
+B_PRIMMODE_Walk_0 = Beta("B_PRIMMODE_Walk_0", 0, None, None, 0)
+B_PRIMMODE_Bicycle_0 = Beta("B_PRIMMODE_Bicycle_0", 0, None, None, 0)
+B_PRIMMODE_Transit_0 = Beta("B_PRIMMODE_Transit_0", 0, None, None, 0)
+B_PRIMMODE_Car_0 = Beta("B_PRIMMODE_Car_0", 0, None, None, 0)
+B_PRIMPURP_Chauffeuring_0 = Beta("B_PRIMPURP_Chauffeuring_0", 0, None, None, 0)
+B_PRIMPURP_LeisureSocial_0 = Beta("B_PRIMPURP_LeisureSocial_0", 0, None, None, 0)
+B_PRIMPURP_ShoppingErrands_0 = Beta("B_PRIMPURP_ShoppingErrands_0", 0, None, None, 0)
+B_PRIMPURP_Work_0 = Beta("B_PRIMPURP_Work_0", 0, None, None, 0)
+B_inc_quant_Q1_0 = Beta("B_inc_quant_Q1_0", 0, None, None, 0)
+B_inc_quant_Q2_0 = Beta("B_inc_quant_Q2_0", 0, None, None, 0)
+B_inc_quant_Q3_0 = Beta("B_inc_quant_Q3_0", 0, None, None, 0)
+B_inc_quant_Q4_0 = Beta("B_inc_quant_Q4_0", 0, None, None, 0)
+B_HHSIZE_0 = Beta("B_HHSIZE_0", 0, None, None, 0)
+B_NUMADLT_0 = Beta("B_NUMADLT_0", 0, None, None, 0)
+B_numu10inhh_0 = Beta("B_numu10inhh_0", 0, None, None, 0)
+B_num1017inhh_0 = Beta("B_num1017inhh_0", 0, None, None, 0)
+B_YOUNGCHILD_0 = Beta("B_YOUNGCHILD_0", 0, None, None, 0)
+B_PartyNum1017_0 = Beta("B_PartyNum1017_0", 0, None, None, 0)
+B_PartyNumu10_0 = Beta("B_PartyNumu10_0", 0, None, None, 0)
+B_CoupleStatus_Couple_0 = Beta("B_CoupleStatus_Couple_0", 0, None, None, 0)
+B_CoupleStatus_Single_0 = Beta("B_CoupleStatus_Single_0", 0, None, None, 0)
+B_SingleAinHH_0 = Beta("B_SingleAinHH_0", 0, None, None, 0)
+B_IsWomen_0 = Beta("B_IsWomen_0", 0, None, None, 0)
+B_IsWorker_0 = Beta("B_IsWorker_0", 0, None, None, 0)
+B_TourComplexity_0 = Beta("B_TourComplexity_0", 0, None, None, 0)
+B_R_AGE_IMP_0 = Beta("B_R_AGE_IMP_0", 0, None, None, 0)
+
+B_time_Female_0 = Beta('B_time_Female_0', 0, None, None, 0)
+B_walk_Female_0 = Beta('B_walk_Female_0', 0, None, None, 0)
+B_bike_Female_0 = Beta('B_bike_Female_0', 0, None, None, 0)
+B_transit_Female_0 = Beta('B_transit_Female_0', 0, None, None, 0)
+B_multi_Female_0 = Beta('B_multi_Female_0', 0, None, None, 0)
+B_cmplx_Female_0 = Beta('B_cmplx_Female_0', 0, None, None, 0)
+B_SingleW_Female_0 = Beta('B_SingleW_Female_0', 0, None, None, 0)
+B_WorkerW_Female_0 = Beta('B_WorkerW_Female_0', 0, None, None, 0)
+
+
+B_time_1 = Beta("B_time_1", 0, None, None, 0)
+B_PRIMMODE_Walk_1 = Beta("B_PRIMMODE_Walk_1", 0, None, None, 0)
+B_PRIMMODE_Bicycle_1 = Beta("B_PRIMMODE_Bicycle_1", 0, None, None, 0)
+B_PRIMMODE_Transit_1 = Beta("B_PRIMMODE_Transit_1", 0, None, None, 0)
+B_PRIMMODE_Car_1 = Beta("B_PRIMMODE_Car_1", 0, None, None, 0)
+B_PRIMPURP_Chauffeuring_1 = Beta("B_PRIMPURP_Chauffeuring_1", 0, None, None, 0)
+B_PRIMPURP_LeisureSocial_1 = Beta("B_PRIMPURP_LeisureSocial_1", 0, None, None, 0)
+B_PRIMPURP_ShoppingErrands_1 = Beta("B_PRIMPURP_ShoppingErrands_1", 0, None, None, 0)
+B_PRIMPURP_Work_1 = Beta("B_PRIMPURP_Work_1", 0, None, None, 0)
+B_inc_quant_Q1_1 = Beta("B_inc_quant_Q1_1", 0, None, None, 0)
+B_inc_quant_Q2_1 = Beta("B_inc_quant_Q2_1", 0, None, None, 0)
+B_inc_quant_Q3_1 = Beta("B_inc_quant_Q3_1", 0, None, None, 0)
+B_inc_quant_Q4_1 = Beta("B_inc_quant_Q4_1", 0, None, None, 0)
+B_HHSIZE_1 = Beta("B_HHSIZE_1", 0, None, None, 0)
+B_NUMADLT_1 = Beta("B_NUMADLT_1", 0, None, None, 0)
+B_numu10inhh_1 = Beta("B_numu10inhh_1", 0, None, None, 0)
+B_num1017inhh_1 = Beta("B_num1017inhh_1", 0, None, None, 0)
+B_YOUNGCHILD_1 = Beta("B_YOUNGCHILD_1", 0, None, None, 0)
+B_PartyNum1017_1 = Beta("B_PartyNum1017_1", 0, None, None, 0)
+B_PartyNumu10_1 = Beta("B_PartyNumu10_1", 0, None, None, 0)
+B_CoupleStatus_Couple_1 = Beta("B_CoupleStatus_Couple_1", 0, None, None, 0)
+B_CoupleStatus_Single_1 = Beta("B_CoupleStatus_Single_1", 0, None, None, 0)
+B_SingleAinHH_1 = Beta("B_SingleAinHH_1", 0, None, None, 0)
+B_IsWomen_1 = Beta("B_IsWomen_1", 0, None, None, 0)
+B_IsWorker_1 = Beta("B_IsWorker_1", 0, None, None, 0)
+B_TourComplexity_1 = Beta("B_TourComplexity_1", 0, None, None, 0)
+B_R_AGE_IMP_1 = Beta("B_R_AGE_IMP_1", 0, None, None, 0)
+
+B_time_Female_1 = Beta('B_time_Female_1', 0, None, None, 0)
+B_walk_Female_1 = Beta('B_walk_Female_1', 0, None, None, 0)
+B_bike_Female_1 = Beta('B_bike_Female_1', 0, None, None, 0)
+B_transit_Female_1 = Beta('B_transit_Female_1', 0, None, None, 0)
+B_multi_Female_1 = Beta('B_multi_Female_1', 0, None, None, 0)
+B_cmplx_Female_1 = Beta('B_cmplx_Female_1', 0, None, None, 0)
+B_SingleW_Female_1 = Beta('B_SingleW_Female_1', 0, None, None, 0)
+B_WorkerW_Female_1 = Beta('B_WorkerW_Female_1', 0, None, None, 0)
+
+
+B_time_2 = Beta("B_time_2", 0, None, None, 1)
+B_PRIMMODE_Walk_2 = Beta("B_PRIMMODE_Walk_2", 0, None, None, 1)
+B_PRIMMODE_Bicycle_2 = Beta("B_PRIMMODE_Bicycle_2", 0, None, None, 1)
+B_PRIMMODE_Transit_2 = Beta("B_PRIMMODE_Transit_2", 0, None, None, 1)
+B_PRIMMODE_Car_2 = Beta("B_PRIMMODE_Car_2", 0, None, None, 1)
+B_PRIMPURP_Chauffeuring_2 = Beta("B_PRIMPURP_Chauffeuring_2", 0, None, None, 1)
+B_PRIMPURP_LeisureSocial_2 = Beta("B_PRIMPURP_LeisureSocial_2", 0, None, None, 1)
+B_PRIMPURP_ShoppingErrands_2 = Beta("B_PRIMPURP_ShoppingErrands_2", 0, None, None, 1)
+B_PRIMPURP_Work_2 = Beta("B_PRIMPURP_Work_2", 0, None, None, 1)
+B_inc_quant_Q1_2 = Beta("B_inc_quant_Q1_2", 0, None, None, 1)
+B_inc_quant_Q2_2 = Beta("B_inc_quant_Q2_2", 0, None, None, 1)
+B_inc_quant_Q3_2 = Beta("B_inc_quant_Q3_2", 0, None, None, 1)
+B_inc_quant_Q4_2 = Beta("B_inc_quant_Q4_2", 0, None, None, 1)
+B_HHSIZE_2 = Beta("B_HHSIZE_2", 0, None, None, 1)
+B_NUMADLT_2 = Beta("B_NUMADLT_2", 0, None, None, 1)
+B_numu10inhh_2 = Beta("B_numu10inhh_2", 0, None, None, 1)
+B_num1017inhh_2 = Beta("B_num1017inhh_2", 0, None, None, 1)
+B_YOUNGCHILD_2 = Beta("B_YOUNGCHILD_2", 0, None, None, 1)
+B_PartyNum1017_2 = Beta("B_PartyNum1017_2", 0, None, None, 1)
+B_PartyNumu10_2 = Beta("B_PartyNumu10_2", 0, None, None, 1)
+B_CoupleStatus_Couple_2 = Beta("B_CoupleStatus_Couple_2", 0, None, None, 1)
+B_CoupleStatus_Single_2 = Beta("B_CoupleStatus_Single_2", 0, None, None, 1)
+B_SingleAinHH_2 = Beta("B_SingleAinHH_2", 0, None, None, 1)
+B_IsWomen_2 = Beta("B_IsWomen_2", 0, None, None, 1)
+B_IsWorker_2 = Beta("B_IsWorker_2", 0, None, None, 1)
+B_TourComplexity_2 = Beta("B_TourComplexity_2", 0, None, None, 1)
+B_R_AGE_IMP_2 = Beta("B_R_AGE_IMP_2", 0, None, None, 1)
+
+B_time_Female_2 = Beta('B_time_Female_2', 0, None, None, 1)
+B_walk_Female_2 = Beta('B_walk_Female_2', 0, None, None, 1)
+B_bike_Female_2 = Beta('B_bike_Female_2', 0, None, None, 1)
+B_transit_Female_2 = Beta('B_transit_Female_2', 0, None, None, 1)
+B_multi_Female_2 = Beta('B_multi_Female_2', 0, None, None, 1)
+B_cmplx_Female_2 = Beta('B_cmplx_Female_2', 0, None, None, 1)
+B_SingleW_Female_2 = Beta('B_SingleW_Female_2', 0, None, None, 1)
+B_WorkerW_Female_2 = Beta('B_WorkerW_Female_2', 0, None, None, 1)
+```
+
+```{python include=FALSE}
+# Define utility functions (JWC_2 is the reference alternative, so its utility is 0)
+V_0 = (
+ASC_JWC_0 +
+B_time_0 * TTM_scaled +
+B_PRIMMODE_Walk_0 * PRIMMODE_Walk +
+B_PRIMMODE_Bicycle_0 * PRIMMODE_Bicycle +
+B_PRIMMODE_Transit_0 * PRIMMODE_Transit +
+
+B_PRIMPURP_Work_0 * PRIMPURP_Work +
+B_PRIMPURP_ShoppingErrands_0 * PRIMPURP_ShoppingErrands +
+B_PRIMPURP_LeisureSocial_0 * PRIMPURP_LeisureSocial +
+
+B_YOUNGCHILD_0 * YOUNGCHILD +
+B_num1017inhh_0 * num1017inhh +
+
+B_TourComplexity_0 * TourComplexity + 
+B_inc_quant_Q1_0 * inc_quant_Q1 +
+B_inc_quant_Q2_0 * inc_quant_Q2 +
+B_inc_quant_Q3_0 * inc_quant_Q3 +
+
+B_IsWomen_0 * IsWomen +
+B_IsWorker_0 * IsWorker +
+B_WorkerW_Female_0 * IsWorker * IsWomen +
+B_CoupleStatus_Single_0 * TourCoupleStatus_Single +
+B_SingleW_Female_0 * TourCoupleStatus_Single * IsWomen
+)
+
+
+V_1 = (
+ASC_JWC_1 +
+B_time_1 * TTM_scaled +
+B_PRIMMODE_Walk_1 * PRIMMODE_Walk +
+B_PRIMMODE_Bicycle_1 * PRIMMODE_Bicycle +
+B_PRIMMODE_Transit_1 * PRIMMODE_Transit +
+
+B_PRIMPURP_Work_1 * PRIMPURP_Work +
+B_PRIMPURP_ShoppingErrands_1 * PRIMPURP_ShoppingErrands +
+B_PRIMPURP_LeisureSocial_1 * PRIMPURP_LeisureSocial +
+
+B_YOUNGCHILD_1 * YOUNGCHILD +
+B_num1017inhh_1 * num1017inhh +
+
+B_TourComplexity_1 * TourComplexity + 
+B_inc_quant_Q1_1 * inc_quant_Q1 +
+B_inc_quant_Q2_1 * inc_quant_Q2 +
+B_inc_quant_Q3_1 * inc_quant_Q3 +
+
+B_IsWomen_1 * IsWomen +
+B_IsWorker_1 * IsWorker +
+B_WorkerW_Female_1 * IsWorker * IsWomen +
+B_CoupleStatus_Single_1 * TourCoupleStatus_Single +
+B_SingleW_Female_1 * TourCoupleStatus_Single * IsWomen
+)
+
+
+V_2 = (
+ASC_JWC_2 +
+B_time_2 * TTM_scaled +
+B_PRIMMODE_Walk_2 * PRIMMODE_Walk +
+B_PRIMMODE_Bicycle_2 * PRIMMODE_Bicycle +
+B_PRIMMODE_Transit_2 * PRIMMODE_Transit +
+
+B_PRIMPURP_Work_2 * PRIMPURP_Work +
+B_PRIMPURP_ShoppingErrands_2 * PRIMPURP_ShoppingErrands +
+B_PRIMPURP_LeisureSocial_2 * PRIMPURP_LeisureSocial +
+
+B_YOUNGCHILD_2 * YOUNGCHILD +
+B_num1017inhh_2 * num1017inhh +
+
+B_TourComplexity_2 * TourComplexity + 
+B_inc_quant_Q1_2 * inc_quant_Q1 +
+B_inc_quant_Q2_2 * inc_quant_Q2 +
+B_inc_quant_Q3_2 * inc_quant_Q3 +
+
+B_IsWomen_2 * IsWomen +
+B_IsWorker_2 * IsWorker +
+B_WorkerW_Female_2 * IsWorker * IsWomen +
+B_CoupleStatus_Single_2 * TourCoupleStatus_Single +
+B_SingleW_Female_2 * TourCoupleStatus_Single * IsWomen
+)
+
+
+# Associate utilities with alternatives
+V = {0: V_0, 1: V_1, 2: V_2}
+av = {0: Avail_JWC_0, 1: Avail_JWC_1, 2: Avail_JWC_2}
+```
+
+
+```{python include=FALSE}
+# 1. Build Choice from dummies
+data["Choice"] = data[["JWC_0", "JWC_1", "JWC_2"]].idxmax(axis=1).str[-1].astype(int)
+
+# 2. Convert booleans to integers
+bool_columns = data.select_dtypes(include="bool").columns
+data[bool_columns] = data[bool_columns].astype(int)
+
+# 3. Recreate database
+database = db.Database("US_interaction", data)
+
+# 4. Define Choice as a Biogeme Variable
+Choice = Variable("Choice")
+```
+
+```{python, echo=TRUE}
+# Define the logit model
+logprob = models.loglogit(V, av, Choice)
+
+# Create the Biogeme object
+the_biogeme = bio.BIOGEME(database, logprob)
+the_biogeme.modelName = "Interaction_US"
+the_biogeme.calculateNullLoglikelihood (av)
+
+# Estimate the model
+results = the_biogeme.estimate()
+```
+
+```{python, echo=TRUE}
+print (f"HTML file: {results.data.htmlFileName}")
+print (f"Pickle file: {results.data.pickleFileName}")
+```
+
+```{python, echo=TRUE}
+# Print results
+pandasResrults = results.getEstimatedParameters()
+pandasResrults
+```
+
+
+
+# ===== SIMULATE P(JWC_2) over a grid of TTM values =====
+```{python}
+import biogeme.database as db
+import biogeme.biogeme as bio
+from biogeme import models
+from biogeme.expressions import Variable, log
+
+# Make a copy for simulation (optionally edit values here for scenarios)
+sim_data = data.copy()
+
+# Build simulation database
+sim_database = db.Database("US_interaction_sim", sim_data)
+
+# Define the derived variable on the simulation database
+TourTimeMinutes_sim = Variable("TourTimeMinutes")
+#sim_database.DefineVariable("TTM_scaled", log(TourTimeMinutes_sim))
+TTM_scaled_sim = Variable("TTM_scaled")
+```
+
+```{python}
+PRIMMODE_Walk_sim = Variable("PRIMMODE_Walk")
+PRIMMODE_Bicycle_sim = Variable("PRIMMODE_Bicycle")
+PRIMMODE_Transit_sim = Variable("PRIMMODE_Transit")
+
+PRIMPURP_Work_sim = Variable("PRIMPURP_Work")
+PRIMPURP_ShoppingErrands_sim = Variable("PRIMPURP_ShoppingErrands")
+PRIMPURP_LeisureSocial_sim = Variable("PRIMPURP_LeisureSocial")
+
+YOUNGCHILD_sim = Variable("YOUNGCHILD")
+num1017inhh_sim = Variable("num1017inhh")
+TourComplexity_sim = Variable("TourComplexity")
+
+inc_quant_Q1_sim = Variable("inc_quant_Q1")
+inc_quant_Q2_sim = Variable("inc_quant_Q2")
+inc_quant_Q3_sim = Variable("inc_quant_Q3")
+
+IsWomen_sim = Variable("IsWomen")
+IsWorker_sim = Variable("IsWorker")
+
+TourCoupleStatus_Single_sim = Variable("TourCoupleStatus_Single")
+
+Avail_JWC_0_sim = Variable("Avail_JWC_0")
+Avail_JWC_1_sim = Variable("Avail_JWC_1")
+Avail_JWC_2_sim = Variable("Avail_JWC_2")
+```
+
+```{python}
+V0_sim = (
+    ASC_JWC_0 +
+    B_time_0 * TTM_scaled_sim +
+    B_PRIMMODE_Walk_0 * PRIMMODE_Walk_sim +
+    B_PRIMMODE_Bicycle_0 * PRIMMODE_Bicycle_sim +
+    B_PRIMMODE_Transit_0 * PRIMMODE_Transit_sim +
+    B_PRIMPURP_Work_0 * PRIMPURP_Work_sim +
+    B_PRIMPURP_ShoppingErrands_0 * PRIMPURP_ShoppingErrands_sim +
+    B_PRIMPURP_LeisureSocial_0 * PRIMPURP_LeisureSocial_sim +
+    B_YOUNGCHILD_0 * YOUNGCHILD_sim +
+    B_num1017inhh_0 * num1017inhh_sim +
+    B_TourComplexity_0 * TourComplexity_sim +
+    B_inc_quant_Q1_0 * inc_quant_Q1_sim +
+    B_inc_quant_Q2_0 * inc_quant_Q2_sim +
+    B_inc_quant_Q3_0 * inc_quant_Q3_sim +
+    B_IsWomen_0 * IsWomen_sim +
+    B_IsWorker_0 * IsWorker_sim +
+    B_WorkerW_Female_0 * IsWorker_sim * IsWomen_sim +
+    B_CoupleStatus_Single_0 * TourCoupleStatus_Single_sim +
+    B_SingleW_Female_0 * TourCoupleStatus_Single_sim * IsWomen_sim
+)
+
+V1_sim = (
+    ASC_JWC_1 +
+    B_time_1 * TTM_scaled_sim +
+    B_PRIMMODE_Walk_1 * PRIMMODE_Walk_sim +
+    B_PRIMMODE_Bicycle_1 * PRIMMODE_Bicycle_sim +
+    B_PRIMMODE_Transit_1 * PRIMMODE_Transit_sim +
+    B_PRIMPURP_Work_1 * PRIMPURP_Work_sim +
+    B_PRIMPURP_ShoppingErrands_1 * PRIMPURP_ShoppingErrands_sim +
+    B_PRIMPURP_LeisureSocial_1 * PRIMPURP_LeisureSocial_sim +
+    B_YOUNGCHILD_1 * YOUNGCHILD_sim +
+    B_num1017inhh_1 * num1017inhh_sim +
+    B_TourComplexity_1 * TourComplexity_sim +
+    B_inc_quant_Q1_1 * inc_quant_Q1_sim +
+    B_inc_quant_Q2_1 * inc_quant_Q2_sim +
+    B_inc_quant_Q3_1 * inc_quant_Q3_sim +
+    B_IsWomen_1 * IsWomen_sim +
+    B_IsWorker_1 * IsWorker_sim +
+    B_WorkerW_Female_1 * IsWorker_sim * IsWomen_sim +
+    B_CoupleStatus_Single_1 * TourCoupleStatus_Single_sim +
+    B_SingleW_Female_1 * TourCoupleStatus_Single_sim * IsWomen_sim
+)
+
+V2_sim = (
+    ASC_JWC_2 +
+    B_time_2 * TTM_scaled_sim +
+    B_PRIMMODE_Walk_2 * PRIMMODE_Walk_sim +
+    B_PRIMMODE_Bicycle_2 * PRIMMODE_Bicycle_sim +
+    B_PRIMMODE_Transit_2 * PRIMMODE_Transit_sim +
+    B_PRIMPURP_Work_2 * PRIMPURP_Work_sim +
+    B_PRIMPURP_ShoppingErrands_2 * PRIMPURP_ShoppingErrands_sim +
+    B_PRIMPURP_LeisureSocial_2 * PRIMPURP_LeisureSocial_sim +
+    B_YOUNGCHILD_2 * YOUNGCHILD_sim +
+    B_num1017inhh_2 * num1017inhh_sim +
+    B_TourComplexity_2 * TourComplexity_sim +
+    B_inc_quant_Q1_2 * inc_quant_Q1_sim +
+    B_inc_quant_Q2_2 * inc_quant_Q2_sim +
+    B_inc_quant_Q3_2 * inc_quant_Q3_sim +
+    B_IsWomen_2 * IsWomen_sim +
+    B_IsWorker_2 * IsWorker_sim +
+    B_WorkerW_Female_2 * IsWorker_sim * IsWomen_sim +
+    B_CoupleStatus_Single_2 * TourCoupleStatus_Single_sim +
+    B_SingleW_Female_2 * TourCoupleStatus_Single_sim * IsWomen_sim
+)
+
+V_sim = {0: V0_sim, 1: V1_sim, 2: V2_sim}
+av_sim = {0: Avail_JWC_0_sim, 1: Avail_JWC_1_sim, 2: Avail_JWC_2_sim}
+```
+
+#simulation results
+```{python}
+# Probability expressions
+P0 = models.logit(V_sim, av_sim, 0)
+
+simulate = {
+    "Prob_JWC_0": P0,
+}
+
+sim_biogeme = bio.BIOGEME(sim_database, simulate)
+sim_biogeme.modelName = "Interaction_US_sim"
+
+# Use estimated betas
+beta_values = results.getBetaValues()
+sim_results = sim_biogeme.simulate(beta_values)
+
+sim_results.head()
+```
+```{python}
+# Attach predicted probabilities back to your sim_data
+plot_df = sim_data.copy()
+plot_df["Prob_JWC_0"] = sim_results["Prob_JWC_0"].values
+
+# Sort by TourTimeMinutes
+plot_df = plot_df.sort_values("TourTimeMinutes").reset_index(drop=True)
+
+# Rolling mean (smooth curve)
+window = max(50, int(0.01 * len(plot_df)))  # ~1% of sample or at least 50
+plot_df["Prob0_roll"] = plot_df["Prob_JWC_0"].rolling(window=window, center=True).mean()
+
+plt.figure(figsize=(8,5))
+plt.plot(plot_df["TourTimeMinutes"], plot_df["Prob0_roll"])
+plt.xlabel("Tour Duration")
+plt.ylabel("Predicted Probability")
+plt.title("Predicted Probability of All-Children-Included Tour and Tour Duration")
+plt.tight_layout()
+plt.show()
+```
+```{python}
+# Probability expressions
+P0 = models.logit(V_sim, av_sim, 0)
+P1 = models.logit(V_sim, av_sim, 1)
+P2 = models.logit(V_sim, av_sim, 2)
+
+simulate = {
+    "Prob_JWC_0": P0,
+    "Prob_JWC_1": P1,
+    "Prob_JWC_2": P2,
+}
+
+sim_biogeme = bio.BIOGEME(sim_database, simulate)
+sim_biogeme.modelName = "Interaction_US_sim"
+
+beta_values = results.getBetaValues()
+sim_results = sim_biogeme.simulate(beta_values)
+
+sim_results.head()
+```
+
+```{python}
+plot_df = sim_data.copy()
+
+plot_df["Prob_JWC_0"] = sim_results["Prob_JWC_0"].values
+plot_df["Prob_JWC_1"] = sim_results["Prob_JWC_1"].values
+plot_df["Prob_JWC_2"] = sim_results["Prob_JWC_2"].values
+
+# Sort by travel time
+plot_df = plot_df.sort_values("TourTimeMinutes").reset_index(drop=True)
+
+window = max(50, int(0.01 * len(plot_df)))  # same window as before
+
+plot_df["Prob0_roll"] = plot_df["Prob_JWC_0"].rolling(window, center=True).mean()
+plot_df["Prob1_roll"] = plot_df["Prob_JWC_1"].rolling(window, center=True).mean()
+plot_df["Prob2_roll"] = plot_df["Prob_JWC_2"].rolling(window, center=True).mean()
+
+plt.figure(figsize=(8,5))
+plt.plot(plot_df["TourTimeMinutes"], plot_df["Prob1_roll"])
+plt.xlabel("Tourr Duration")
+plt.ylabel("Predicted Probability")
+plt.title("Predicted Probability of Partly-Children-Included Tour and Tour Duration")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(8,5))
+plt.plot(plot_df["TourTimeMinutes"], plot_df["Prob2_roll"])
+plt.xlabel("Tour Duration")
+plt.ylabel("Predicted Probability")
+plt.title("Predicted Probability of Children-Excluded Tour and Tour Duration")
+plt.tight_layout()
+plt.show()
+```
+```{python}
+plt.figure(figsize=(8,5))
+plt.plot(plot_df["TourTimeMinutes"], plot_df["Prob0_roll"], label="All-Children-Included")
+plt.plot(plot_df["TourTimeMinutes"], plot_df["Prob1_roll"], label="Partly-Children-Included")
+plt.plot(plot_df["TourTimeMinutes"], plot_df["Prob2_roll"], label="Children-Excluded Tour")
+
+plt.xlabel("Tour Duration")
+plt.ylabel("Predicted Probability")
+plt.title("Predicted Probability of 3 Tour Types and Tour Duration")
+plt.legend()
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+plt.figure(figsize=(8, 5))
+
+# Stack the probabilities cumulatively (0 to 1 scale)
+cum0 = plot_df["Prob0_roll"]
+cum1 = plot_df["Prob0_roll"] + plot_df["Prob1_roll"]
+cum2 = plot_df["Prob0_roll"] + plot_df["Prob1_roll"] + plot_df["Prob2_roll"]  # should be ~1.0
+
+x = plot_df["TourTimeMinutes"]
+
+# Fill each band
+plt.fill_between(x, 0,    cum0, color='cyan',   label='JWC 0')
+plt.fill_between(x, cum0, cum1, color='green',  label='JWC 1')
+plt.fill_between(x, cum1, cum2, color='yellow', label='JWC 2')
+
+# Add boundary lines
+plt.plot(x, cum0, color='black', linewidth=1)
+plt.plot(x, cum1, color='black', linewidth=1)
+plt.plot(x, cum2, color='black', linewidth=1)
+
+plt.xlim(left=0)
+plt.ylim(0, 1.0)
+plt.xlabel("Tour Duration")
+plt.ylabel("Probability")
+plt.title("Predicted Probability of 3 Tour Types and Tour Duration")
+plt.legend(loc='upper right')
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
+
+# --- Colors matching the reference image ---
+COLOR_0 = '#5b9bd5'   # muted blue  — All children (JWC_0)
+COLOR_1 = '#f4a442'   # orange      — Some children (JWC_1)
+COLOR_2 = '#5aae61'   # green       — No children (JWC_2)
+
+# --- Rolling average (smoothing window) ---
+WINDOW = 15  # adjust to taste; larger = smoother
+
+def rolling(series, w):
+    return series.rolling(window=w, center=True, min_periods=1).mean()
+
+plot_df_s = plot_df.sort_values("TourTimeMinutes").copy()
+x = plot_df_s["TourTimeMinutes"]
+
+p0 = rolling(plot_df_s["Prob0_roll"], WINDOW)
+p1 = rolling(plot_df_s["Prob1_roll"], WINDOW)
+p2 = rolling(plot_df_s["Prob2_roll"], WINDOW)
+
+cum0 = p0
+cum1 = p0 + p1
+cum2 = p0 + p1 + p2  # ≈ 1.0
+
+# --- Plot ---
+fig, ax = plt.subplots(figsize=(10, 5))
+
+ax.fill_between(x, 0,    cum0, color=COLOR_0, alpha=0.85)
+ax.fill_between(x, cum0, cum1, color=COLOR_1, alpha=0.85)
+ax.fill_between(x, cum1, cum2, color=COLOR_2, alpha=0.85)
+
+# Padding: extend axes beyond data range
+ax.set_xlim(x.iloc[0], 700)
+ax.set_ylim(0, 1.0)
+ax.spines['left'].set_visible(False)
+ax.spines['bottom'].set_visible(True)
+ax.spines['left'].set_color('black')
+ax.spines['bottom'].set_color('black')
+
+# Very subtle grid
+ax.grid(True, color='lightgray', linewidth=0.3, alpha=0.3, zorder=3)
+
+ax.set_xlabel("Tour Duration (minutes)", fontsize=11)
+ax.set_ylabel("Predicted Probability", fontsize=11)
+ax.set_title(
+    "Predicted Probabilities by Tour Duration",
+    fontsize=12
+)
+
+ax.set_facecolor('white')
+fig.patch.set_facecolor('white')
+
+legend_patches = [
+    mpatches.Patch(color=COLOR_0, label='All children'),
+    mpatches.Patch(color=COLOR_1, label='Some children'),
+    mpatches.Patch(color=COLOR_2, label='No children'),
+]
+ax.legend(handles=legend_patches, loc='upper right', framealpha=0.9, fontsize=10)
+
+plt.tight_layout()
+plt.show()
+```
+
+
+
+#Marginal Utility
+```{python}
+base = sim_data.iloc[[0]].copy()
+
+grid = np.linspace(10, 720, 300)
+df_scen = pd.concat([base]*len(grid), ignore_index=True)
+
+df_scen["TourTimeMinutes"] = grid
+df_scen["TTM_scaled"] = np.log(df_scen["TourTimeMinutes"])
+
+scen_db = db.Database("scen", df_scen)
+
+TTM_scaled_s = Variable("TTM_scaled")
+
+# rebuild utilities using *_s variables
+
+V0_sim_1 = (
+    ASC_JWC_0 +
+    B_time_0 * TTM_scaled_sim +
+    B_PRIMMODE_Walk_0 * PRIMMODE_Walk_sim +
+    B_PRIMMODE_Bicycle_0 * PRIMMODE_Bicycle_sim +
+    B_PRIMMODE_Transit_0 * PRIMMODE_Transit_sim +
+    B_PRIMPURP_Work_0 * PRIMPURP_Work_sim +
+    B_PRIMPURP_ShoppingErrands_0 * PRIMPURP_ShoppingErrands_sim +
+    B_PRIMPURP_LeisureSocial_0 * PRIMPURP_LeisureSocial_sim +
+    B_YOUNGCHILD_0 * YOUNGCHILD_sim +
+    B_num1017inhh_0 * num1017inhh_sim +
+    B_TourComplexity_0 * TourComplexity_sim +
+    B_inc_quant_Q1_0 * inc_quant_Q1_sim +
+    B_inc_quant_Q2_0 * inc_quant_Q2_sim +
+    B_inc_quant_Q3_0 * inc_quant_Q3_sim +
+    B_IsWomen_0 * IsWomen_sim +
+    B_IsWorker_0 * IsWorker_sim +
+    B_WorkerW_Female_0 * IsWorker_sim * IsWomen_sim +
+    B_CoupleStatus_Single_0 * TourCoupleStatus_Single_sim +
+    B_SingleW_Female_0 * TourCoupleStatus_Single_sim * IsWomen_sim
+)
+
+V1_sim_1 = (
+    ASC_JWC_1 +
+    B_time_1 * TTM_scaled_sim +
+    B_PRIMMODE_Walk_1 * PRIMMODE_Walk_sim +
+    B_PRIMMODE_Bicycle_1 * PRIMMODE_Bicycle_sim +
+    B_PRIMMODE_Transit_1 * PRIMMODE_Transit_sim +
+    B_PRIMPURP_Work_1 * PRIMPURP_Work_sim +
+    B_PRIMPURP_ShoppingErrands_1 * PRIMPURP_ShoppingErrands_sim +
+    B_PRIMPURP_LeisureSocial_1 * PRIMPURP_LeisureSocial_sim +
+    B_YOUNGCHILD_1 * YOUNGCHILD_sim +
+    B_num1017inhh_1 * num1017inhh_sim +
+    B_TourComplexity_1 * TourComplexity_sim +
+    B_inc_quant_Q1_1 * inc_quant_Q1_sim +
+    B_inc_quant_Q2_1 * inc_quant_Q2_sim +
+    B_inc_quant_Q3_1 * inc_quant_Q3_sim +
+    B_IsWomen_1 * IsWomen_sim +
+    B_IsWorker_1 * IsWorker_sim +
+    B_WorkerW_Female_1 * IsWorker_sim * IsWomen_sim +
+    B_CoupleStatus_Single_1 * TourCoupleStatus_Single_sim +
+    B_SingleW_Female_1 * TourCoupleStatus_Single_sim * IsWomen_sim
+)
+
+V2_sim_1 = (
+    ASC_JWC_2 +
+    B_time_2 * TTM_scaled_sim +
+    B_PRIMMODE_Walk_2 * PRIMMODE_Walk_sim +
+    B_PRIMMODE_Bicycle_2 * PRIMMODE_Bicycle_sim +
+    B_PRIMMODE_Transit_2 * PRIMMODE_Transit_sim +
+    B_PRIMPURP_Work_2 * PRIMPURP_Work_sim +
+    B_PRIMPURP_ShoppingErrands_2 * PRIMPURP_ShoppingErrands_sim +
+    B_PRIMPURP_LeisureSocial_2 * PRIMPURP_LeisureSocial_sim +
+    B_YOUNGCHILD_2 * YOUNGCHILD_sim +
+    B_num1017inhh_2 * num1017inhh_sim +
+    B_TourComplexity_2 * TourComplexity_sim +
+    B_inc_quant_Q1_2 * inc_quant_Q1_sim +
+    B_inc_quant_Q2_2 * inc_quant_Q2_sim +
+    B_inc_quant_Q3_2 * inc_quant_Q3_sim +
+    B_IsWomen_2 * IsWomen_sim +
+    B_IsWorker_2 * IsWorker_sim +
+    B_WorkerW_Female_2 * IsWorker_sim * IsWomen_sim +
+    B_CoupleStatus_Single_2 * TourCoupleStatus_Single_sim +
+    B_SingleW_Female_2 * TourCoupleStatus_Single_sim * IsWomen_sim
+)
+
+V_s  = {0: V0_sim_1, 1: V1_sim_1, 2: V2_sim_1}
+av_s = {0: Avail_JWC_0_sim, 1: Avail_JWC_1_sim, 2: Avail_JWC_2_sim}
+
+P0_s = models.logit(V_s, av_s, 0)
+
+biosim = bio.BIOGEME(scen_db, {"P_JWC_0": P0_s})
+out = biosim.simulate(beta_values)
+
+plt.figure(figsize=(8,5))
+plt.plot(grid, out["P_JWC_0"], linewidth=2)
+plt.xlabel("Tour Duration")
+plt.ylabel("Predicted Probability")
+plt.title("Marginal Effect of All-Children-Included and Tour Duration")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+base = sim_data.iloc[[0]].copy()
+
+grid = np.linspace(10, 720, 300)
+df_scen = pd.concat([base]*len(grid), ignore_index=True)
+
+df_scen["TourTimeMinutes"] = grid
+df_scen["TTM_scaled"] = np.log(df_scen["TourTimeMinutes"])
+
+scen_db = db.Database("scen", df_scen)
+
+TTM_scaled_s = Variable("TTM_scaled")
+
+# rebuild utilities using *_s variables
+# samw as above
+
+V_s  = {0: V0_sim_1, 1: V1_sim_1, 2: V2_sim_1}
+av_s = {0: Avail_JWC_0_sim, 1: Avail_JWC_1_sim, 2: Avail_JWC_2_sim}
+
+# Probability of alternative 1
+P1_s = models.logit(V_s, av_s, 1)
+
+biosim = bio.BIOGEME(
+    scen_db,
+    {"P_JWC_1": P1_s}
+)
+
+out = biosim.simulate(beta_values)
+
+plt.figure(figsize=(8,5))
+plt.plot(grid, out["P_JWC_1"], linewidth=2)
+plt.xlabel("Tour Duration")
+plt.ylabel("Predicted Probability")
+plt.title("Marginal Effect of Partly-Children-Included and Tour Duration")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+base = sim_data.iloc[[0]].copy()
+
+grid = np.linspace(10, 720, 300)
+df_scen = pd.concat([base]*len(grid), ignore_index=True)
+
+df_scen["TourTimeMinutes"] = grid
+df_scen["TTM_scaled"] = np.log(df_scen["TourTimeMinutes"])
+
+scen_db = db.Database("scen", df_scen)
+
+TTM_scaled_s = Variable("TTM_scaled")
+
+# rebuild utilities using *_s variables
+# samw as above
+
+V_s  = {0: V0_sim_1, 1: V1_sim_1, 2: V2_sim_1}
+av_s = {0: Avail_JWC_0_sim, 1: Avail_JWC_1_sim, 2: Avail_JWC_2_sim}
+
+# Probability of alternative 2
+P2_s = models.logit(V_s, av_s, 2)
+
+biosim = bio.BIOGEME(
+    scen_db,
+    {"P_JWC_2": P2_s}
+)
+
+out = biosim.simulate(beta_values)
+
+plt.figure(figsize=(8,5))
+plt.plot(grid, out["P_JWC_2"], linewidth=2)
+plt.xlabel("Tour Duration")
+plt.ylabel("Predicted Probability")
+plt.title("Marginal Effect of Children-Excluded and Tour Duration")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+base = sim_data.iloc[[0]].copy()
+grid = np.linspace(10, 720, 300)
+df_scen = pd.concat([base]*len(grid), ignore_index=True)
+df_scen["TourTimeMinutes"] = grid
+df_scen["TTM_scaled"] = np.log(df_scen["TourTimeMinutes"])
+
+scen_db = db.Database("scen", df_scen)
+
+V_s  = {0: V0_sim_1, 1: V1_sim_1, 2: V2_sim_1}
+av_s = {0: Avail_JWC_0_sim, 1: Avail_JWC_1_sim, 2: Avail_JWC_2_sim}
+
+P0_s = models.logit(V_s, av_s, 0)
+P1_s = models.logit(V_s, av_s, 1)
+P2_s = models.logit(V_s, av_s, 2)
+
+biosim = bio.BIOGEME(scen_db, {
+    "P_JWC_0": P0_s,
+    "P_JWC_1": P1_s,
+    "P_JWC_2": P2_s
+})
+
+out = biosim.simulate(beta_values)
+
+plt.figure(figsize=(8, 5))
+plt.plot(grid, out["P_JWC_0"], linewidth=2, label="All-Children-Included")
+plt.plot(grid, out["P_JWC_1"], linewidth=2, label="Partly-Children-Included")
+plt.plot(grid, out["P_JWC_2"], linewidth=2, label="Children-Excluded")
+
+plt.xlabel("Tour Duration")
+plt.ylabel("Predicted Probability")
+plt.title("Marginal Effect of Tour Duration on Tour Type Probability")
+plt.legend()
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+base = sim_data.iloc[[0]].copy()
+grid = np.linspace(10, 720, 300)
+df_scen = pd.concat([base]*len(grid), ignore_index=True)
+df_scen["TourTimeMinutes"] = grid
+df_scen["TTM_scaled"] = np.log(df_scen["TourTimeMinutes"])
+
+scen_db = db.Database("scen", df_scen)
+
+V_s  = {0: V0_sim_1, 1: V1_sim_1, 2: V2_sim_1}
+av_s = {0: Avail_JWC_0_sim, 1: Avail_JWC_1_sim, 2: Avail_JWC_2_sim}
+
+P0_s = models.logit(V_s, av_s, 0)
+P1_s = models.logit(V_s, av_s, 1)
+P2_s = models.logit(V_s, av_s, 2)
+
+biosim = bio.BIOGEME(scen_db, {
+    "P_JWC_0": P0_s,
+    "P_JWC_1": P1_s,
+    "P_JWC_2": P2_s
+})
+
+out = biosim.simulate(beta_values)
+
+# Cumulative stacking
+cum0 = out["P_JWC_0"]
+cum1 = out["P_JWC_0"] + out["P_JWC_1"]
+cum2 = out["P_JWC_0"] + out["P_JWC_1"] + out["P_JWC_2"]  # ~1.0
+
+plt.figure(figsize=(8, 5))
+
+plt.fill_between(grid, 0,    cum0, color='cyan',   label='JWC 0 — All-Children-Included')
+plt.fill_between(grid, cum0, cum1, color='green',  label='JWC 1 — Partly-Children-Included')
+plt.fill_between(grid, cum1, cum2, color='yellow', label='JWC 2 — Children-Excluded')
+
+plt.plot(grid, cum0, color='black', linewidth=1)
+plt.plot(grid, cum1, color='black', linewidth=1)
+plt.plot(grid, cum2, color='black', linewidth=1)
+
+plt.xlim(left=0)
+plt.ylim(0, 1.0)
+plt.xlabel("Tour Duration")
+plt.ylabel("Probability")
+plt.title("Marginal Effect of Tour Duration on Tour Type Probability")
+plt.legend(loc='upper right')
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+subset = sim_data[sim_data["PRIMPURP_Work"] == 1].copy()
+subset = subset.drop(columns=["PRIMMODE", "PRIMPURP", "inc_quant", "TourCoupleStatus"], errors="ignore")
+subset_db = db.Database("sim_Work", subset)
+
+V_s  = {0: V0_sim_1, 1: V1_sim_1, 2: V2_sim_1}
+av_s = {0: Avail_JWC_0_sim, 1: Avail_JWC_1_sim, 2: Avail_JWC_2_sim}
+
+biosim = bio.BIOGEME(subset_db, {"P_JWC_0": models.logit(V_s, av_s, 0), "P_JWC_1": models.logit(V_s, av_s, 1), "P_JWC_2": models.logit(V_s, av_s, 2)})
+biosim.modelName = "sim_Work"
+out = biosim.simulate(beta_values)
+
+subset = subset.reset_index(drop=True)
+subset["P0"] = out["P_JWC_0"].values
+subset["P1"] = out["P_JWC_1"].values
+subset["P2"] = out["P_JWC_2"].values
+subset = subset.sort_values("TourTimeMinutes").reset_index(drop=True)
+
+window = max(50, int(0.01 * len(subset)))
+subset["P0_roll"] = subset["P0"].rolling(window, center=True).mean()
+subset["P1_roll"] = subset["P1"].rolling(window, center=True).mean()
+subset["P2_roll"] = subset["P2"].rolling(window, center=True).mean()
+
+x    = subset["TourTimeMinutes"]
+cum0 = subset["P0_roll"]
+cum1 = subset["P0_roll"] + subset["P1_roll"]
+cum2 = subset["P0_roll"] + subset["P1_roll"] + subset["P2_roll"]
+
+plt.figure(figsize=(8, 5))
+plt.fill_between(x, 0, cum0, color='cyan', label='JWC 0 — All-Children-Included')
+plt.fill_between(x, cum0, cum1, color='green', label='JWC 1 — Partly-Children-Included')
+plt.fill_between(x, cum1, cum2, color='yellow', label='JWC 2 — Children-Excluded')
+plt.plot(x, cum0, color='black', linewidth=1)
+plt.plot(x, cum1, color='black', linewidth=1)
+plt.plot(x, cum2, color='black', linewidth=1)
+plt.xlim(left=0)
+plt.ylim(0, 1.0)
+plt.xlabel("Tour Duration")
+plt.ylabel("Probability")
+plt.title("Tour Type Probability — Work")
+plt.legend(loc='upper right')
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+subset = sim_data[sim_data["PRIMPURP_ShoppingErrands"] == 1].copy()
+subset = subset.drop(columns=["PRIMMODE", "PRIMPURP", "inc_quant", "TourCoupleStatus"], errors="ignore")
+subset_db = db.Database("sim_Shopping", subset)
+
+V_s  = {0: V0_sim_1, 1: V1_sim_1, 2: V2_sim_1}
+av_s = {0: Avail_JWC_0_sim, 1: Avail_JWC_1_sim, 2: Avail_JWC_2_sim}
+
+biosim = bio.BIOGEME(subset_db, {"P_JWC_0": models.logit(V_s, av_s, 0), "P_JWC_1": models.logit(V_s, av_s, 1), "P_JWC_2": models.logit(V_s, av_s, 2)})
+biosim.modelName = "sim_Shopping"
+out = biosim.simulate(beta_values)
+
+subset = subset.reset_index(drop=True)
+subset["P0"] = out["P_JWC_0"].values
+subset["P1"] = out["P_JWC_1"].values
+subset["P2"] = out["P_JWC_2"].values
+subset = subset.sort_values("TourTimeMinutes").reset_index(drop=True)
+
+window = max(50, int(0.01 * len(subset)))
+subset["P0_roll"] = subset["P0"].rolling(window, center=True).mean()
+subset["P1_roll"] = subset["P1"].rolling(window, center=True).mean()
+subset["P2_roll"] = subset["P2"].rolling(window, center=True).mean()
+
+x    = subset["TourTimeMinutes"]
+cum0 = subset["P0_roll"]
+cum1 = subset["P0_roll"] + subset["P1_roll"]
+cum2 = subset["P0_roll"] + subset["P1_roll"] + subset["P2_roll"]
+
+plt.figure(figsize=(8, 5))
+plt.fill_between(x, 0, cum0, color='cyan', label='JWC 0 — All-Children-Included')
+plt.fill_between(x, cum0, cum1, color='green', label='JWC 1 — Partly-Children-Included')
+plt.fill_between(x, cum1, cum2, color='yellow', label='JWC 2 — Children-Excluded')
+plt.plot(x, cum0, color='black', linewidth=1)
+plt.plot(x, cum1, color='black', linewidth=1)
+plt.plot(x, cum2, color='black', linewidth=1)
+plt.xlim(left=0)
+plt.ylim(0, 1.0)
+plt.xlabel("Tour Duration")
+plt.ylabel("Probability")
+plt.title("Tour Type Probability — Shopping & Errands")
+plt.legend(loc='upper right')
+plt.tight_layout()
+plt.show()
+```
+
+
+

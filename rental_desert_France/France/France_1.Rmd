@@ -1,0 +1,200 @@
+---
+title: "GeographySetup_France"
+author: "dawon"
+date: "2024-11-14"
+output: html_document
+---
+
+```{r}
+#LOAD LIBRARIES------
+library(tidyverse)
+library(sf)
+library(dplyr)
+library(data.table)
+```
+
+
+#Spatial Units (Tract)
+```{r}
+#UPDATE SETTINGS AND FILE PATH------
+#file path 
+filepath_data <- "/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_IRIS/" 
+
+# Load the shapefile (adjust the path if necessary)
+france_tracts_shp <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/com_uu2020_2024/com_uu2020_2024.shp")
+
+# Load the CSV file containing additional data
+france_tracts <- read.csv("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/France_MunicipalComposition.csv")
+```
+
+```{r}
+# Join the shapefile data with the CSV data on the common 'codegeo' column
+# Assuming 'codegeo' is named the same in both datasets; if not, adjust accordingly
+france_tracts <- france_tracts_shp %>%
+  left_join(france_tracts, by = c("codgeo" = "codgeo"))
+
+# Drop the redundant columns and keep only the unique ones
+france_tracts <- france_tracts %>%
+  select(-ends_with(".x")) %>%
+  # Optionally, rename columns to remove the .x suffix if needed
+  rename_with(~ gsub("\\.y$", "", .))
+
+# Categorize places as city or suburban based on the columns 'UU2020' and 'statut_com_uu'
+france_tracts <- france_tracts %>%
+  mutate(
+    # Define municipality status based on statut_com_uu
+    municipality_status = case_when(
+      statut_com_uu == "H" ~ "Outside urban unit",
+      statut_com_uu == "C" ~ "Central city",
+      statut_com_uu == "B" ~ "Suburb",
+      statut_com_uu == "I" ~ "Isolated city",
+      TRUE ~ "Unknown"
+    ),
+    # Determine if place is city or suburb based on status
+    city = if_else(municipality_status == "Central city", 1, 0),
+    suburb = if_else(municipality_status == "Suburb", 1, 0)
+  )
+
+# Select relevant columns
+france_tracts <- france_tracts %>%
+  select(codgeo, libgeo, dep, reg, municipality_status, city, suburb, geometry)
+```
+
+```{r}
+# CATEGORIZE TRACTS AS URBAN/RURAL ----
+# Since France does not use CBSAs, we’ll use urban/rural status at the commune level.
+# Assume communes outside urban units are rural.
+
+france_tracts <- france_tracts %>%
+  mutate(
+    rural = if_else(municipality_status == "Outside urban unit", 1, 0)
+  )
+
+# Summary of classification
+summary(france_tracts)
+
+# Save the processed data (if needed)
+# st_write(france_tracts, "C:/path/to/save/processed_france_places.shp")
+```
+
+
+#Urban Area
+```{r}
+# Load the shapefile for France urban units
+france_cbsa_shp <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/uu2020_2024/uu2020_2024.shp")
+
+# Load the CSV for French population data
+france_cbsa <- read.csv("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/France_UrbanUnit.csv")
+
+# Join the shapefile and population data on the common 'UU2020' column
+france_cbsa <- france_cbsa %>%
+  left_join(france_cbsa_shp, by = "uu2020")
+# Drop the redundant columns and keep only the unique ones
+france_cbsa <- france_cbsa %>%
+  select(-ends_with(".y")) %>%
+  # Optionally, rename columns to remove the .x suffix if needed
+  rename_with(~ gsub("\\.x$", "", .))
+```
+
+```{r}
+# Join the shapefile data with the CSV data on the common 'uu2020' column
+# Assuming 'uu2020' is named the same in both datasets; if not, adjust accordingly
+france_units <- france_tracts %>%
+  left_join(france_cbsa, by = c("uu2020" = "uu2020"))
+# Drop the redundant columns and keep only the unique ones
+france_units <- france_units %>%
+  select(-ends_with(".y")) %>%
+  # Optionally, rename columns to remove the .x suffix if needed
+  rename_with(~ gsub("\\.x$", "", .))
+```
+
+```{r}
+# Define city and suburb status based on population range (e.g., 100,000 or more for cities)
+france_units <- france_units %>%
+  mutate(
+    # Define city status based on population size range
+    popcity = if_else(TUU2017 == 7 | TUU2017 == 8, 1, 0),  # Urban unit with 100,000+ inhabitants or Paris
+    city = if_else(popcity == 1, 1, 0),  # Mark as city
+    suburb = if_else(city == 1, 0, 1)  # Mark as suburb if not a city
+  )
+
+# Assuming you want to assign city/suburb status to tracts
+# Create centroid layer for tracts 
+france_units$centroid <- st_centroid(france_units$geometry)  
+```
+
+```{r}
+# Rank urban units based on their population sizes and filter the top categories
+france_units_pop <- france_units %>%
+  mutate(
+    # Classify urban units by population size categories
+    pop_category = case_when(
+      TDUU2017 == 71 ~ "200,000 to 299,999",
+      TDUU2017 == 72 ~ "300,000 to 499,999",
+      TDUU2017 == 73 ~ "500,000 to 1,999,999",
+      TDUU2017 == 80 ~ "Paris",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  # Rank urban units by population size category
+  mutate(
+    pop_rank = case_when(
+      pop_category == "200,000 to 299,999" ~ 1,
+      pop_category == "300,000 to 499,999" ~ 2,
+      pop_category == "500,000 to 1,999,999" ~ 3,
+      pop_category == "Paris" ~ 4,
+      TRUE ~ NA_real_  # For other cases, assign NA
+    ),
+    # Add a flag for top population categories (500,000 to 1,999,999 and Paris)
+    pop_top = if_else(pop_category %in% c("500,000 to 1,999,999", "Paris"), 1, 0)
+  )##There are 154 500,000 to 1,999,999 and 1 Paris
+```
+
+
+#Rental Desert
+```{r}
+#file path 
+filepath_data <- "/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_IRIS/" 
+
+# Set file paths (update with actual IRIS data CSV file paths)
+iris_data_path <- "/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_IRIS/Copy of base-ic-logement-2021.csv"
+
+# Load IRIS data (assuming it includes geographic coordinates)
+iris_data <- read.csv(iris_data_path, sep = ",", header = TRUE, fill = TRUE, check.names = FALSE)
+
+# Example: Convert IRIS data to sf object if coordinates are included
+# Uncomment and adjust if longitude/latitude columns are available
+# iris_sf <- st_as_sf(iris_data, coords = c("longitude_column", "latitude_column"), crs = 4326)
+
+# Summarize main population and housing data by region
+summary <- iris_data %>%
+  group_by(REG) %>%  # Group by region code
+  summarise(total_main_residences = sum(P21_RP, na.rm = TRUE),
+            total_population = sum(P21_NPER_RP, na.rm = TRUE),
+            total_houses = sum(P21_RPMAISON, na.rm = TRUE),
+            total_apartments = sum(P21_RPAPPART, na.rm = TRUE),
+            total_vacant_dwellings = sum(P21_LOGVAC, na.rm = TRUE))
+```
+
+```{r}
+# 2. Calculate rental housing units and total housing units
+france_rental <- iris_data %>%
+  mutate(
+    rental_hu = P21_RP_LOC, # Number of rental housing units
+    tot_hsg_units = P21_RP, # Total number of housing units
+    rental_sh = (rental_hu / tot_hsg_units) * 100, # Rental share in percentage
+    rental_des = ifelse(rental_sh < 20, 1, 0) # Rental desert if share is under 20%
+  )
+
+# 3. Check the summary of the data
+summary(france_rental)
+
+# 4. Calculate total housing units and the share of rental deserts
+total_hsg_units <- sum(france_rental$tot_hsg_units, na.rm = TRUE)
+rental_desert_share <- prop.table(table(france_rental$rental_des)) * 100
+
+# 5. Display the results
+print(paste("Total Housing Units: ", total_hsg_units))
+print("Share of Rental Deserts (%):")
+print(rental_desert_share)
+```

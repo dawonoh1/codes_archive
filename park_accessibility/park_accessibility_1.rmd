@@ -1,0 +1,344 @@
+---
+title: "park_accessibility"
+author: "dawon"
+date: "2026-07-31"
+output: html_document
+---
+
+### Data Formatting
+```{python}
+import pandas as pd
+import numpy as np
+import re
+
+output_path = r"C:\Users\ohdaw\OneDrive - Harvard University\snu_remains\redo\FINAL_dataset_2019only.csv"
+data = pd.read_csv(output_path, encoding="utf-8")
+
+group_cols = [c for c in data.columns if re.match(r'^[MW]_\d{4}$', c)]
+
+# Build park variables
+data["green_ratio"] = data["greenarea_area"] / data["park_area"] * 100
+data["user_area"] = (
+      data["openspaace_area"]
+    + data["road_area"]
+    + data["walkingtrail_area"]
+    + data["shadecanopy_area"]
+)
+data["user_ratio"] = data["user_area"] / data["park_area"] * 100
+data["amenity_number"] = (
+      data["gymtrack_number"]
+    + data["swimmingpool_number"]
+    + data["sportsfacility_number"]
+    + data["playground_number"]
+    + data["cafeteria_number"]
+    + data["kiosk_number"]
+)
+data["parking_number"] = data["parkingcapacity_number"]
+data["transit_number"] = data["bus500"] + data["sub500"]
+data["park_area_ha"]   = data["park_area"] / 10_000
+
+amenities = ["green_ratio", "user_ratio", "amenity_number",
+             "parking_number", "transit_number", "park_area_ha"]
+
+# Wide -> long
+data_long = data.melt(
+    id_vars=["INFLOW_CD", "ID", "c_eq_min"] + amenities,
+    value_vars=group_cols,
+    var_name="group",
+    value_name="visitors"
+)
+data_long = data_long[data_long["visitors"] > 0].copy()
+
+# Parse sex & age
+def parse_group(g):
+    female = 1 if g[0] == "W" else 0
+    age_lo = int(g[2:4])
+    age_hi = int(g[4:6])
+    age_mid = (age_lo + age_hi) / 2
+    return female, age_mid
+
+data_long[["female", "age"]] = data_long["group"].apply(
+    lambda x: pd.Series(parse_group(x))
+)
+data_long["age_sq"] = data_long["age"] ** 2
+
+# Center/scale age before interactions -- keeps CCREM better conditioned
+data_long["age_c"]    = data_long["age"] - data_long["age"].mean()
+data_long["age_c_sq"] = data_long["age_c"] ** 2
+
+for a in amenities:
+    data_long[f"{a}_F"]    = data_long[a] * data_long["female"]
+    data_long[f"{a}_A"]    = data_long[a] * data_long["age_c"]
+    data_long[f"{a}_FA"]   = data_long[a] * data_long["female"] * data_long["age_c"]
+    data_long[f"{a}_A2"]   = data_long[a] * data_long["age_c_sq"]
+    data_long[f"{a}_FA2"]  = data_long[a] * data_long["female"] * data_long["age_c_sq"]
+
+data_long["ID"] = data_long["ID"].astype(str)
+data_long["INFLOW_CD"] = data_long["INFLOW_CD"].astype(str)
+
+export_path = r"C:\Users\ohdaw\OneDrive - Harvard University\snu_remains\redo\data_long_for_ccrem.csv"
+data_long.to_csv(export_path, index=False, encoding="utf-8")
+print(f"Exported {data_long.shape[0]} rows, {data_long.shape[1]} columns to:\n{export_path}")
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lme4)
+library(lmerTest)
+library(performance)
+library(car)
+library(ggplot2)
+
+data_long <- read.csv(
+  "C:/Users/ohdaw/OneDrive - Harvard University/snu_remains/redo/data_long_for_ccrem.csv",
+  encoding = "UTF-8"
+)
+
+data_long$ID        <- as.factor(data_long$ID)
+data_long$INFLOW_CD <- as.factor(data_long$INFLOW_CD)
+
+data_long$visitors_norm <- data_long$visitors / mean(data_long$visitors)
+
+amenities <- c("green_ratio", "user_ratio", "amenity_number",
+               "parking_number", "transit_number", "park_area_ha")
+
+vars_to_check <- c(amenities, "female", "age", "age_c", "age_sq", "age_c_sq",
+                    "c_eq_min", "visitors")
+```
+
+
+### CCREM 
+```{python}
+import matplotlib.pyplot as plt
+import os
+
+output_dir = r"C:\Users\ohdaw\OneDrive - Harvard University\snu_remains\redo\var_distributions"
+os.makedirs(output_dir, exist_ok=True)
+
+# Core variables feeding the model — raw amenities, demographics, outcome, and weights.
+# (Skipping the _F/_A/_FA/_A2/_FA2 interaction columns since they're just products
+#  of these — check them here first, and interactions will follow the same pattern.)
+vars_to_check = amenities + ["female", "age", "age_c", "age_sq", "age_c_sq",
+                              "c_eq_min", "visitors"]
+
+for var in vars_to_check:
+    if var not in data_long.columns:
+        print(f"Skipping {var} — not found in data_long")
+        continue
+
+    plt.figure(figsize=(6, 4))
+    plt.hist(data_long[var].dropna(), bins=30, edgecolor="black", alpha=0.75)
+    plt.title(f"Distribution of {var}")
+    plt.xlabel(var)
+    plt.ylabel("Count")
+    plt.tight_layout()
+
+    safe_name = var.replace("/", "_")
+    plt.savefig(os.path.join(output_dir, f"dist_{safe_name}.png"), dpi=150, bbox_inches="tight")
+    plt.show()
+    plt.close()
+
+    # Quick numeric summary alongside each plot — helpful for spotting scale mismatches at a glance
+    print(f"{var}: min={data_long[var].min():.3f}, max={data_long[var].max():.3f}, "
+          f"mean={data_long[var].mean():.3f}, sd={data_long[var].std():.3f}\n")
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+scale_check <- data_long %>%
+  select(all_of(vars_to_check)) %>%
+  summarise(across(everything(), list(
+    min = ~min(., na.rm = TRUE),
+    max = ~max(., na.rm = TRUE),
+    sd  = ~sd(., na.rm = TRUE)
+  ))) %>%
+  pivot_longer(everything(), names_to = c("variable", ".value"), names_pattern = "(.*)_(min|max|sd)$") %>%
+  arrange(desc(sd))
+
+print(scale_check, n = Inf)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lme4)
+library(lmerTest)
+library(performance)
+library(car)
+library(ggplot2)
+
+# Patch for R < 4.4 where %||% isn't in base -- lme4's summary printing
+# uses it internally (via reformulas::format_sdvar), so without this,
+# printing/summarizing any lmer model object fails on this R version.
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+data_long <- read.csv(
+  "C:/Users/ohdaw/OneDrive - Harvard University/snu_remains/redo/data_long_for_ccrem.csv",
+  encoding = "UTF-8"
+)
+
+data_long$ID        <- as.factor(data_long$ID)
+data_long$INFLOW_CD <- as.factor(data_long$INFLOW_CD)
+
+# Normalize visitor weights to mean 1 -- preserves relative weighting while
+# keeping residual variance/R2/AIC on an interpretable scale (raw range was
+# 0.01 to 662,707, which distorted variance-based fit statistics)
+data_long$visitors_norm <- data_long$visitors / mean(data_long$visitors)
+
+amenities <- c("green_ratio", "user_ratio", "amenity_number",
+               "parking_number", "transit_number", "park_area_ha")
+
+# Centered age used throughout to avoid age/age_sq collinearity (VIF was ~200
+# with raw age; centering resolves this without changing fitted values)
+fixed_vars_sq <- c(
+  "female", "age_c", "age_c_sq",
+  amenities,
+  paste0(amenities, "_F"),
+  paste0(amenities, "_A"),
+  paste0(amenities, "_FA"),
+  paste0(amenities, "_A2"),
+  paste0(amenities, "_FA2")
+)
+
+formula_str <- as.formula(
+  paste("c_eq_min ~", paste(fixed_vars_sq, collapse = " + "),
+        "+ (1|ID) + (1|INFLOW_CD)")
+)
+
+ccrem_normw_t <- lmerTest::lmer(
+  formula_str,
+  data = data_long,
+  weights = visitors_norm,
+  control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(ccrem_normw_t)
+```
+
+
+### Diagnostic
+```{r}
+cat("=== isSingular ===\n")
+print(isSingular(ccrem_normw_t))
+
+cat("\n=== VarCorr (variance components) ===\n")
+print(VarCorr(ccrem_normw_t))
+
+cat("\n=== rePCA (which RE dimension is degenerate) ===\n")
+print(summary(rePCA(ccrem_normw_t)))
+
+cat("\n=== ICC by group ===\n")
+print(icc(ccrem_normw_t, by_group = TRUE))
+
+cat("\n=== VIF ===\n")
+print(vif(ccrem_normw_t))
+
+cat("\n=== R2 ===\n")
+print(r2(ccrem_normw_t))
+
+cat("\n=== AIC / BIC / logLik ===\n")
+print(AIC(ccrem_normw_t))
+print(BIC(ccrem_normw_t))
+print(logLik(ccrem_normw_t))
+```
+
+
+### Cross-optimizer Stability Check
+```{r}
+meth.tab <- cbind(optimizer = c("bobyqa", "Nelder_Mead"), method = c("", ""))
+
+af <- allFit(ccrem_normw_t, meth.tab = meth.tab)
+
+cat("=== Which optimizers converged OK ===\n")
+print(summary(af)$which.OK)
+
+cat("\n=== Fixed effects across optimizers (amenity vars) ===\n")
+print(summary(af)$fixef[, amenities])
+
+cat("\n=== Log-likelihood across optimizers ===\n")
+print(summary(af)$llik)
+
+cat("\n=== Random-effect variance components across optimizers ===\n")
+print(summary(af)$sdcor)
+```
+
+
+### Marginal effects by age group and sex
+```{r}
+library(dplyr)
+library(tidyr)
+
+coefs <- fixef(ccrem_normw_t)
+age_mean <- mean(data_long$age)   # from the ORIGINAL (uncentered) age column used to build age_c
+
+age_groups <- c(
+  "0-9" = 5, "10-19" = 15, "20-29" = 25, "30-39" = 35,
+  "40-49" = 45, "50-59" = 55, "60-69" = 65, "70+" = 75
+)
+age_groups_centered <- age_groups - age_mean
+
+marginal_effect_sq <- function(coefs, var, age_c, female) {
+  age_c_sq <- age_c^2
+  b    <- coefs[[var]]
+  bf   <- coefs[[paste0(var, "_F")]]
+  ba   <- coefs[[paste0(var, "_A")]]
+  bfa  <- coefs[[paste0(var, "_FA")]]
+  ba2  <- coefs[[paste0(var, "_A2")]]
+  bfa2 <- coefs[[paste0(var, "_FA2")]]
+
+  b + female*bf + age_c*ba + female*age_c*bfa +
+    age_c_sq*ba2 + female*age_c_sq*bfa2
+}
+
+marginal_table <- expand.grid(
+  Amenity = amenities,
+  AgeGroup = names(age_groups),
+  stringsAsFactors = FALSE
+) %>%
+  mutate(
+    AgeCentered = age_groups_centered[AgeGroup],
+    Men_Effect   = mapply(marginal_effect_sq, Amenity, AgeCentered, MoreArgs = list(coefs = coefs, female = 0)),
+    Women_Effect = mapply(marginal_effect_sq, Amenity, AgeCentered, MoreArgs = list(coefs = coefs, female = 1)),
+    W_minus_M    = Women_Effect - Men_Effect
+  )
+
+#print(marginal_table, n = Inf)
+library(tibble)
+print(as_tibble(marginal_table), n = Inf)
+```
+
+
+### Plot
+```{r}
+library(ggplot2)
+
+age_order <- names(age_groups)
+marginal_table$AgeGroup <- factor(marginal_table$AgeGroup, levels = age_order)
+
+marginal_long <- marginal_table %>%
+  select(Amenity, AgeGroup, Men_Effect, Women_Effect) %>%
+  pivot_longer(cols = c(Men_Effect, Women_Effect), names_to = "Sex", values_to = "Effect") %>%
+  mutate(Sex = ifelse(Sex == "Men_Effect", "Men", "Women"))
+
+ggplot(marginal_long, aes(x = AgeGroup, y = Effect, color = Sex, group = Sex)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  facet_wrap(~ Amenity, scales = "free_y") +
+  labs(
+    title = "Marginal Effect of Park Variables on Travel Cost by Age Group and Sex",
+    subtitle = "CCREM, centered age, normalized visitor weights",
+    x = "Age Group", y = "Effect on travel cost (min)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  "C:/Users/ohdaw/OneDrive - Harvard University/snu_remains/redo/marginal_effects_ccrem.png",
+  width = 12, height = 7, dpi = 150
+)
+```
+

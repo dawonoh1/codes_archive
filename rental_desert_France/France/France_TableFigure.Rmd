@@ -1,0 +1,585 @@
+---
+title: "France_TableFigures"
+author: "dawon"
+date: "2024-12-03"
+output: html_document
+---
+
+```{r echo = T,error=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+#LOAD LIBRARIES------
+library(tidyverse)
+library(sf)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(readr)
+library(showtext) 
+library(tidyr)
+library(leaflet)
+```
+
+
+## Drop the population data with NAs
+```{r}
+
+iris_with_population <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Population.shp")
+
+france_rental <- st_read("/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/france_rental.csv")
+
+# Perform the spatial join using 'st_join'
+# This will match geometries based on spatial relationships
+iris_with_population_and_rental <- iris_with_population %>%
+    left_join(france_rental, by = c("CODE_IR" = "IRIS"))
+
+
+iris_with_population_and_rental <- iris_with_population_and_rental %>%
+  select(-ends_with(".y")) %>%
+  # Optionally, rename columns to remove the .x suffix if needed
+  rename_with(~ gsub("\\.x$", "", .))
+
+# Check the result
+#head(iris_with_population_and_rental)
+
+# Optionally, save the resulting shapefile
+#st_write(iris_with_population_and_rental, "C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Population_Rent.shp")
+```
+
+```{r}
+# Alternatively, specifically target the P21_PMEN column to drop rows with NA in this column
+iris_with_population_and_rental_clean <- iris_with_population_and_rental[!is.na(iris_with_population_and_rental$P21_PMEN), ]
+```
+
+
+## Sort the top 100 populated Urban Unit /IRIS
+```{r}
+# Convert 'P21_PMEN' to numeric, and handle any coercion warnings
+iris_with_population_and_rental$P21_PMEN <- as.numeric(iris_with_population_and_rental$P21_PMEN)
+
+# Sort the top 100 populated Urban Unit
+# Group by Urban Unit and summarize the total P21_PMEN, then arrange and slice the top 100
+top_100_urban_units <- iris_with_population_and_rental %>%
+  group_by(UU2020) %>%
+  summarize(total_population = sum(P21_PMEN, na.rm = TRUE)) %>%
+  arrange(desc(total_population)) %>%
+  slice_head(n = 100)
+# View the result
+print(top_100_urban_units)
+
+# Sort the top 100 populated IRIS
+# Group by IRIS and summarize the total P21_PMEN, then arrange and slice the top 100
+top_100_IRIS <- iris_with_population_and_rental %>%
+  group_by(CODE_IR) %>%
+  summarize(total_population = sum(P21_PMEN, na.rm = TRUE)) %>%
+  arrange(desc(total_population)) %>%
+  slice_head(n = 100)
+# View the result
+print(top_100_IRIS)
+```
+```{r}
+# Sort the dataset by P21_PMEN in descending order
+sorted_urban_units <- iris_with_population_and_rental %>%
+  arrange(desc(P21_PMEN))
+# Extract unique top 100 urban units, keeping all columns
+top_100_urban_units_dataset <- sorted_urban_units %>%
+  filter(!duplicated(uu2020)) %>%
+  slice_head(n = 100)
+```
+
+```{r}
+# Extract unique top 100 urban units, keeping all columns
+top_100_urban_units_dataset <- sorted_urban_units %>%
+  filter(!duplicated(uu2020)) %>%
+  slice_head(n = 100)
+list(top_100_urban_units_dataset)
+```
+
+
+## Rental Desert IRISs for Top 100 Populated Urban Units
+```{r}
+# Convert the necessary columns in the dataset to numeric
+top_100_urban_units_dataset <- top_100_urban_units_dataset %>%
+  mutate(
+    P21_RP = as.numeric(P21_RP),
+    P21_NPER_RP = as.numeric(P21_NPER_RP),
+    P21_RPMAISON = as.numeric(P21_RPMAISON),
+    P21_RPAPPART = as.numeric(P21_RPAPPART),
+    P21_LOGVAC = as.numeric(P21_LOGVAC)
+  )
+
+# Summarize main population and housing data by urban unit
+urban_units_summary <- top_100_urban_units_dataset %>%
+  summarise(
+    total_main_residences = sum(P21_RP, na.rm = TRUE),
+    total_population = sum(P21_NPER_RP, na.rm = TRUE),
+    total_houses = sum(P21_RPMAISON, na.rm = TRUE),
+    total_apartments = sum(P21_RPAPPART, na.rm = TRUE),
+    total_vacant_dwellings = sum(P21_LOGVAC, na.rm = TRUE)
+  )
+
+# Convert necessary columns to numeric
+top_100_urban_units_dataset <- top_100_urban_units_dataset %>%
+  mutate(
+    P21_RP_LOC = as.numeric(P21_RP_LOC),
+    P21_RP = as.numeric(P21_RP)
+  )
+
+# Calculate rental metrics for urban units
+urban_units_rental <- top_100_urban_units_dataset %>%
+  mutate(
+    rental_hu = P21_RP_LOC,
+    tot_hsg_units = P21_RP,
+    rental_sh = (rental_hu / tot_hsg_units) * 100,
+    rental_des = ifelse(rental_sh < 20, 1, 0)
+  )
+
+# Check summary metrics for urban units
+total_hsg_units_urban <- sum(urban_units_rental$tot_hsg_units, na.rm = TRUE)
+rental_desert_share_urban <- prop.table(table(urban_units_rental$rental_des)) * 100
+
+print(paste("Total Housing Units (Urban Units): ", total_hsg_units_urban))
+rental_desert_share_deserts_urban <- rental_desert_share_urban["1"]
+print(paste("Share of Rental Deserts (Urban Units) (%):", rental_desert_share_deserts_urban))
+```
+
+```{r}
+# Identify IRIS within Top 100 Urban Units
+top_100_urban_irs_ids <- top_100_urban_units_dataset$uu2020
+
+# Filter IRIS from the entire dataset based on uu2020 from the top 100 urban units
+iris_in_top_100_urban_units <- iris_with_population_and_rental %>%
+  filter(uu2020 %in% top_100_urban_irs_ids)
+
+# Calculate rental metrics for these filtered IRIS
+iris_rental_deserts <- iris_in_top_100_urban_units %>%
+  mutate(
+    P21_RP_LOC = as.numeric(P21_RP_LOC),
+    P21_RP     = as.numeric(P21_RP),
+    rental_hu      = P21_RP_LOC,
+    tot_hsg_units  = P21_RP,
+    rental_sh      = (rental_hu / tot_hsg_units) * 100,
+    rental_des     = ifelse(rental_sh < 20, 1, 0)
+  )
+
+# Calculate summary metrics
+total_hsg_units_iris <- sum(iris_rental_deserts$tot_hsg_units, na.rm = TRUE)
+rental_desert_share_iris <- prop.table(table(iris_rental_deserts$rental_des)) * 100
+
+print(paste("Total Housing Units (IRIS in Top Urban Units): ", total_hsg_units_iris))
+rental_desert_share_deserts_iris <- rental_desert_share_iris["1"]
+print(paste("Share of Rental Deserts (IRIS in Top Urban Units) (%):", rental_desert_share_deserts_iris))
+```
+
+
+## Distribution of Rental Desert IRISs by Municipality Type for Top 100 Populated Urban Units
+```{r}
+# Convert all P21_ columns to numeric FIRST
+iris_with_population_and_rental <- iris_with_population_and_rental %>%
+  mutate(across(starts_with("P21_"), as.numeric))
+
+# Then create iris_in_top_100_urban_units
+iris_in_top_100_urban_units <- iris_with_population_and_rental %>%
+  filter(uu2020 %in% top_100_urban_units_dataset$uu2020) %>%
+  mutate(
+    rental_hu     = P21_RP_LOC,
+    tot_hsg_units = P21_RP,
+    rental_sh     = (rental_hu / tot_hsg_units) * 100,
+    rental_des    = as.numeric(ifelse(rental_sh < 20, 1, 0))
+  )
+
+# Summary of all IRIS regions in top 100 urban units by municipality type
+distribution_all_iris_municipalities <- iris_in_top_100_urban_units %>%
+  filter(!is.na(rental_des)) %>%
+  mutate(IRIS_count = 1) %>%
+  group_by(mncplt_) %>%
+  summarise(total_iris = sum(IRIS_count, na.rm = TRUE)) %>%
+  mutate(share = total_iris / sum(total_iris, na.rm = TRUE) * 100) %>%
+  filter(total_iris > 0)
+print(distribution_all_iris_municipalities)
+
+# Distribution of rental deserts by municipality type in top 100 IRIS
+distribution_rental_deserts <- iris_in_top_100_urban_units %>%
+  filter(rental_des == 1) %>%
+  group_by(mncplt_) %>%
+  summarise(total_rental_deserts = sum(rental_des, na.rm = TRUE)) %>%
+  mutate(share = total_rental_deserts / sum(total_rental_deserts, na.rm = TRUE) * 100) %>%
+  filter(total_rental_deserts > 0)
+print(distribution_rental_deserts)
+```
+
+
+```{r}
+# Load income data (ensure the path is correct)
+income_data_path <- "/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_income/Copy of BASE_TD_FILO_IRIS_2021_DEC.csv"
+income_data <- read.csv(income_data_path, sep = ",", header = TRUE, fill = TRUE, check.names = FALSE)
+
+# Filter IRIS within the top 100 urban units
+iris_in_top_100_urban_units <- iris_with_population_and_rental %>%
+  filter(uu2020 %in% top_100_urban_units_dataset$uu2020) %>%
+  mutate(
+    rental_hu = P21_RP_LOC,
+    tot_hsg_units = P21_RP,
+    rental_sh = (rental_hu / tot_hsg_units) * 100,
+    rental_des = ifelse(rental_sh < 20, 1, 0)
+  )
+
+# Join with income data
+iris_with_income <- iris_in_top_100_urban_units %>%
+  left_join(income_data, by = c("CODE_IR" = "IRIS"))
+
+# Clean up the dataset
+iris_with_income <- iris_with_income %>%
+  select(-ends_with(".y")) %>%
+  rename_with(~ gsub("\\.x$", "", .))
+
+# Optionally, save the resulting dataset to a CSV
+write.csv(iris_with_income, "/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Income.csv")
+```
+
+## average share of single/multi -family homes Across the IRISs Included in The Top 100 Populated Urban Units
+```{r}
+# Create a neighborhood category based on rental share
+iris_with_income <- iris_with_income %>%
+  mutate(rd_nbrhd_cat = case_when(
+    rental_sh < 20 ~ "1 RentalDesert",
+    rental_sh >= 20 & rental_sh < 80 ~ "2 MixedTenure",
+    rental_sh >= 80 ~ "3 HighRental"
+  ))
+
+# Calculate and summarize the average share of single-family homes by neighborhood category
+avg_sfsh_by_category <- iris_with_income %>%
+  filter(!is.na(rd_nbrhd_cat)) %>%
+  group_by(rd_nbrhd_cat) %>%
+  summarise(avg_sfsh = mean(P21_MAISON / P21_LOG * 100, na.rm = TRUE))
+
+print(avg_sfsh_by_category)
+
+# Calculate and summarize the average share of multi-family housing by neighborhood category
+avg_mf_by_category <- iris_with_income %>%
+  filter(!is.na(rd_nbrhd_cat)) %>%
+  group_by(rd_nbrhd_cat) %>%
+  summarise(avg_mf_5pl = mean(P21_APPART / P21_LOG * 100, na.rm = TRUE))
+
+print(avg_mf_by_category)
+```
+
+
+## Average Income Across the IRISs Included in The Top 100 Populated Urban Units
+```{r}
+# Calculate average median incomes by rental category
+iris_with_income %>%
+  filter(!is.na(rental_sh) & !is.na(DEC_MED21)) %>% 
+  mutate(rd_nbrhd_cat = case_when(
+    rental_sh < 20 ~ "1 RentalDesert",
+    rental_sh >= 20 & rental_sh < 80 ~ "2 MixedTenure",
+    rental_sh >= 80 ~ "3 HighRental"
+  )) %>% 
+  group_by(rd_nbrhd_cat) %>% 
+  summarise(avg_income = mean(DEC_MED21, na.rm = TRUE))
+```
+
+
+## Income Distributions Across the IRISs Included in The Top 100 Populated Urban Units
+```{r}
+# Categorize IRIS based on median income and rental share, and calculate shares
+income_shares_iris <- iris_with_income %>%
+  filter(!is.na(rental_sh) & !is.na(DEC_MED21)) %>%
+  mutate(
+    rd_nbrhd_cat = case_when(
+      rental_sh < 20 ~ "Rental Deserts",
+      rental_sh >= 20 & rental_sh < 80 ~ "Mixed-Tenure Neighborhoods",
+      rental_sh >= 80 ~ "High-Rental Neighborhoods"
+    ),
+    low_income_flag = if_else(DEC_MED21 < 20000, 1, 0),
+    middle_income_flag = if_else(DEC_MED21 >= 20000 & DEC_MED21 <= 40000, 1, 0),
+    high_income_flag = if_else(DEC_MED21 > 40000, 1, 0)
+  ) %>%
+  group_by(rd_nbrhd_cat) %>%
+  summarise(
+    avg_lish = mean(low_income_flag, na.rm = TRUE) * 100,
+    avg_mish = mean(middle_income_flag, na.rm = TRUE) * 100,
+    avg_hish = mean(high_income_flag, na.rm = TRUE) * 100
+  ) %>%
+  pivot_longer(cols = starts_with("avg_"), names_to = "Income Level", values_to = "Share") %>%
+  mutate(`Income Level` = recode(`Income Level`,
+                                 "avg_lish" = "Low Income",
+                                 "avg_mish" = "Middle Income",
+                                 "avg_hish" = "High Income"))
+
+# Optionally, save the resulting dataset to a CSV
+write.csv(iris_with_income, "/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Income.csv")
+```
+
+```{r}
+# Plotting
+ggplot(income_shares_iris, aes(x = `Income Level`, y = Share, fill = rd_nbrhd_cat)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Average Share by Income Level and Neighborhood Type",
+       x = "Household Income",
+       y = "Average Share (Percent)",
+       fill = "Neighborhood Type") +
+  scale_fill_manual(values = c("#e5c3c6", "#b089bc", "#4d004b")) +
+  theme_minimal()
+```
+
+
+##Join IRISs Included in The Top 100 Populated Urban Units data to the shp
+```{r}
+# Load the shapefile
+iris_with_population <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Population.shp")
+
+# Load the CSV file containing additional data
+iris_with_income <- read.csv("/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Income.csv")
+
+# Perform the join based on 'IRIS' in iris_with_income and 'CODE_IRIS' in iris_with_population
+iris_with_income_housing_pop <- iris_with_population %>%
+  left_join(iris_with_income, by = c("CODE_IR" = "IRIS"))
+
+# Drop redundant columns and keep only the unique ones
+iris_with_income_housing_pop <- iris_with_income_housing_pop %>%
+  select(-ends_with(".y")) %>%
+  # Optionally, rename columns to remove the .x suffix if needed
+  rename_with(~ gsub("\\.x$", "", .))
+
+# Optional: check the names of the final data to verify column alignment
+# names(iris_with_income_housing_pop)
+
+# Select relevant columns, including geometry
+# Modify as needed to include/exclude specific columns
+iris_with_income_housing_pop <- iris_with_income_housing_pop %>%
+  select(INSEE_C, NOM_COM, CODE_IR, geometry)
+
+# Optional: view the first few rows of the result to verify the join
+# head(iris_with_income_housing_pop)
+
+# Save the resulting shapefile if needed
+# st_write(iris_with_income_housing_pop, "path/to/save/Updated_IRIS_with_Income_and_Rental_Data.shp")
+```
+
+
+##Static Map of Reental Desert Distribution
+```{r}
+# Load the shapefile containing IRIS data with France boundaries
+iris_with_population <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Population.shp")
+
+# Prepare the rental category data
+selected_rental_data <- iris_with_income %>%
+  filter(!is.na(rental_sh)) %>%
+  mutate(
+    rd_nbrhd_cat = case_when(
+      rental_sh < 20 ~ "Rental Desert",     # Focus only on rental deserts
+      rental_sh >= 20 & rental_sh < 80 ~ "Mixed-Tenure",
+      rental_sh >= 80 ~ "High-Rental"
+    )
+  ) %>%
+  select(IRIS, rd_nbrhd_cat)
+
+# Merge with spatial data
+map_data <- iris_with_population %>%
+  left_join(selected_rental_data, by = c("CODE_IR" = "IRIS"))
+
+# Keep only the rental desert categories for specific coloring
+rental_desert_data <- map_data %>% filter(rd_nbrhd_cat == "Rental Desert")
+
+# Plot the map with ggplot2 - entire boundary colored lightly, focus on rental deserts
+ggplot() +
+  geom_sf(data = iris_with_population, fill = "gray", color = "black", alpha = 0.5) +  # Base map for France, shaded lightly
+  geom_sf(data = rental_desert_data, aes(fill = rd_nbrhd_cat), color = "#e34a33") +
+  scale_fill_manual(values = c("Rental Desert" = "#e34a33")) +  # Color specific to rental deserts
+  theme_minimal() +
+  labs(title = "IRIS Rental Deserts in France", fill = "Rental Category")
+```
+
+
+##Interactive Map of Rental Desert Distribution
+```{r eval=FALSE, include=FALSE}
+# Load the shapefile (assuming it's in a file named 'iris_shapefile.shp')
+iris_with_population <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Population.shp")
+
+# Load rental and income data
+france_rental <- read_csv("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/france_rental.csv")
+income_data   <- read_csv("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Income.csv")
+
+# Join to create france_rental_with_income
+france_rental_with_income <- france_rental %>%
+  left_join(
+    income_data %>% select(codgeo, DEC_MED21),  # only bring in the income column
+    by = c("IRIS" = "codgeo")
+  )
+
+iris_shapefile_poly <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_Combined_Data.shp") %>%
+  st_transform(crs = 4326)
+
+# Select necessary columns and perform the join
+selected_rental_data <- france_rental_with_income %>%
+  filter(!is.na(rental_sh)) %>%
+  mutate(
+    rd_nbrhd_cat = case_when(
+      rental_sh < 20                    ~ "Rental Desert",
+      rental_sh >= 20 & rental_sh < 80  ~ "Mixed-Tenure",
+      rental_sh >= 80                   ~ "High-Rental"
+    )
+  ) %>%
+  select(IRIS, rd_nbrhd_cat)
+
+# Convert CRS to WGS 84
+iris_shapefile_poly <- st_transform(iris_shapefile_poly, crs = 4326)
+
+# Merge with spatial data
+map_data <- iris_with_population %>%
+  left_join(selected_rental_data, by = c("CODE_IR" = "IRIS"))
+
+# Ensure no NAs in key columns for plotting
+map_data <- map_data %>% filter(!is.na(rd_nbrhd_cat))
+
+# Filter IRIS codes that belong to top 100 populated urban units
+iris_in_top_100_urban_units <- iris_with_population_and_rental %>%
+  filter(uu2020 %in% top_100_urban_units_dataset$uu2020) %>%
+  pull(CODE_IR)
+
+# Merge with selected rental data for desired IRIS
+map_data_poly <- iris_shapefile_poly %>%
+  filter(CODE_IR %in% iris_in_top_100_urban_units) %>%
+  left_join(selected_rental_data, by = c("CODE_IR" = "IRIS")) %>%
+  filter(!is.na(rd_nbrhd_cat))
+
+# Create the interactive map
+leaflet(map_data_poly) %>%
+  addTiles() %>%
+  addPolygons(
+    fillColor = ~ifelse(rd_nbrhd_cat == "Rental Desert", "red",
+                        ifelse(rd_nbrhd_cat == "Mixed-Tenure", "blue", "green")),
+    fillOpacity = 0.7,
+    color = "white",
+    weight = 0.5,
+    label = ~paste("Category:", rd_nbrhd_cat)
+  ) %>%
+  addLegend(
+    "bottomright",
+    colors = c("red", "blue", "green"),
+    labels = c("Rental Desert", "Mixed-Tenure", "High-Rental"),
+    title = "Neighborhood Type"
+  )
+```
+
+
+##Interactive map of distribution with boundaries
+```{r eval=FALSE, include=FALSE}
+# Load and prepare the shapefile with polygons
+iris_with_boundaries <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_Combined_Data.shp")
+
+# Prepare the rental data with categories
+selected_rental_data <- france_rental_with_income %>%
+  filter(!is.na(rental_sh)) %>%
+  mutate(
+    rd_nbrhd_cat = case_when(
+      rental_sh < 20 ~ "Rental Desert",
+      rental_sh >= 20 & rental_sh < 80 ~ "Mixed-Tenure",
+      rental_sh >= 80 ~ "High-Rental"
+    )
+  ) %>%
+  select(IRIS, rd_nbrhd_cat)
+
+# Convert CRS to WGS 84 (EPSG: 4326)
+iris_with_boundaries <- st_transform(iris_with_boundaries, crs = 4326)
+
+# Merge with selected rental data for proper mapping
+map_data <- iris_with_boundaries %>%
+  left_join(selected_rental_data, by = c("CODE_IR" = "IRIS")) %>%
+  filter(!is.na(rd_nbrhd_cat))
+
+# Filter IRIS codes belonging to the top 100 populated urban units
+iris_in_top_100_urban_units <- iris_with_population_and_rental %>%
+  filter(uu2020 %in% top_100_urban_units_dataset$uu2020) %>%
+  pull(CODE_IR)
+
+# Filter the map data to include only relevant IRIS
+map_data <- map_data %>%
+  filter(CODE_IR %in% iris_in_top_100_urban_units)
+
+# Create the interactive map using boundaries
+leaflet(map_data_poly) %>%
+  addTiles() %>%
+  addPolygons(
+    fillColor = ~ifelse(rd_nbrhd_cat == "Rental Desert", "red",
+                        ifelse(rd_nbrhd_cat == "Mixed-Tenure", "blue", "green")),
+    fillOpacity = 0.7,
+    color = "white",      # border color
+    weight = 0.5,         # border thickness
+    label = ~paste("Category:", rd_nbrhd_cat)
+  ) %>%
+  addLegend(
+    "bottomright",
+    colors = c("red", "blue", "green"),
+    labels = c("Rental Desert", "Mixed-Tenure", "High-Rental"),
+    title = "Neighborhood Type"
+  )
+```
+
+
+##Name of The Metro with top 100 Population
+```{r}
+# Aggregate population by metro (using 'libgeo' as the metro name column)
+top_metro_locs <- iris_with_population_and_rental %>%
+    filter(uu2020 %in% top_100_urban_irs_ids) %>%
+    group_by(libgeo) %>%
+    summarise(total_population = sum(P21_PMEN, na.rm = TRUE)) %>%
+    arrange(desc(total_population))
+
+# Select the names corresponding to the top 100 most populated metro locations
+top_metros <- top_metro_locs %>% 
+    slice_head(n = 100) %>% # Select the top 100 entries
+    select(libgeo)
+
+# Print the top 100 metro names
+print(top_metros)
+```
+
+
+## Maps of Top 10 Metro
+````{r}
+iris_shapefile_poly <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_Combined_Data.shp") %>%
+  st_transform(crs = 4326)
+
+iris_in_top_100_urban_units <- iris_with_population_and_rental %>%
+  filter(uu2020 %in% top_100_urban_units_dataset$uu2020) %>%
+  pull(CODE_IR)
+
+map_data_poly <- iris_shapefile_poly %>%
+  filter(CODE_IR %in% iris_in_top_100_urban_units) %>%
+  left_join(selected_rental_data, by = c("CODE_IR" = "IRIS")) %>%
+  left_join(
+    as.data.frame(iris_with_population_and_rental) %>%
+      select(CODE_IR, libgeo) %>%
+      distinct(),
+    by = "CODE_IR"
+  ) %>%
+  filter(!is.na(rd_nbrhd_cat))
+````
+
+```{r}
+## Assume your data preparation steps are complete, and 'map_data' is ready
+
+# Loop over top metros to create static maps
+for (metro_name in top_100_urban_units_dataset$libgeo) {
+  metro_data <- map_data_poly %>%
+    filter(libgeo == metro_name)    # ✅ libgeo not libgeo.x
+  
+  if (nrow(metro_data) == 0) {
+    message("No data for: ", metro_name)
+    next
+  }
+  
+  map_plot <- ggplot() +
+    geom_sf(data = metro_data, aes(fill = rd_nbrhd_cat), color = "black", size = 0.2) +
+    scale_fill_manual(values = c("Rental Desert" = "red", 
+                                 "Mixed-Tenure"  = "blue", 
+                                 "High-Rental"   = "green")) +
+    labs(title = paste("IRIS Map for", metro_name), fill = "Neighborhood Type") +
+    theme_minimal() +
+    theme(panel.background = element_rect(fill = "white", color = NA),
+          plot.title = element_text(hjust = 0.5))
+  
+  print(map_plot)
+  # ggsave(filename = paste0("IRIS_Map_", metro_name, ".png"), plot = map_plot, width = 8, height = 6)
+}
+```

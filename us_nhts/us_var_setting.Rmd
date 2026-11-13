@@ -1,0 +1,922 @@
+---
+title: "us_var_setting"
+author: "dawon"
+date: "2025-09-29"
+output: html_document
+---
+
+```{python}
+import pyodbc
+import pandas as pd
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+```
+
+```{python}
+# Define the folder path
+folder_path = r"C:\Users\ohdaw\OneDrive - Harvard University\tu_data\us_nhts"
+
+# Function to read CSV with encoding handling
+def read_csv_with_encoding(file_path):
+    try:
+        return pd.read_csv(file_path, encoding="utf-8")  # Try UTF-8 first
+    except UnicodeDecodeError:
+        return pd.read_csv(file_path, encoding="ISO-8859-1")  # Fallback to ISO-8859-1
+
+# Load CSV files with error handling
+dT = read_csv_with_encoding(os.path.join(folder_path, "us_jwc_classified.csv"))
+```
+
+# drop home-away tours
+```{python}
+# Drop all rows where OUTOFTWN == 1
+dT = dT[dT["OUTOFTWN"] != 1].copy()
+
+before = len(dT)
+dT = dT[dT["OUTOFTWN"] != 1].copy()
+after = len(dT)
+print(f"Dropped {before - after} rows ({before} → {after}).")
+```
+
+
+# Number of Journey Types with children u10y/ 10-17y/ 0-17y
+```{python}
+# Ensure numeric child counts (coerce bad values to 0)
+dT = dT.copy()
+for col in ["PartyNumu10", "PartyNum1017"]:
+    dT[col] = pd.to_numeric(dT[col], errors="coerce").fillna(0)
+
+# Per-tour aggregation
+tour_counts = (
+    dT.groupby(["TOURID", "JourneyWithChildren"], dropna=False)
+      .agg(
+          u10_per_tour=("PartyNumu10", "sum"),
+          a10_17_per_tour=("PartyNum1017", "sum"),
+      )
+      .reset_index()
+)
+tour_counts["a0_17_per_tour"] = tour_counts["u10_per_tour"] + tour_counts["a10_17_per_tour"]
+
+# TABLE 1: Crosstab of per-tour child counts vs JourneyWithChildren
+table1 = (
+    tour_counts.pivot_table(
+        index=["u10_per_tour", "a10_17_per_tour", "a0_17_per_tour"],
+        columns="JourneyWithChildren",
+        values="TOURID",
+        aggfunc="nunique",
+        fill_value=0,
+    )
+    .sort_index()
+)
+
+# TABLE 2: Frequency of JourneyWithChildren
+table2 = (
+    tour_counts["JourneyWithChildren"]
+    .value_counts(dropna=False)
+    .sort_index()
+    .rename_axis("JourneyWithChildren")
+    .to_frame("TourCount")
+)
+
+print("\n=== Table 1: Crosstab ===")
+print(table1)
+print("\n=== Table 2: Counts ===")
+print(table2)
+```
+
+# The number of people in the HH
+```{python}
+# Make sure HHSIZE is numeric
+dT["HHSIZE"] = pd.to_numeric(dT["HHSIZE"], errors="coerce")
+
+# Count unique HOUSEID by household size
+hhsize_counts = (
+    dT.groupby("HHSIZE", dropna=False)["HOUSEID"]
+      .nunique()
+      .reset_index(name="NumHouseholds")
+      .sort_values("HHSIZE")
+)
+
+print(hhsize_counts)
+```
+
+# The number of adults (over 18) in HH
+```{python}
+# Make sure HHSIZE is numeric
+dT["NUMADLT"] = pd.to_numeric(dT["NUMADLT"], errors="coerce")
+
+# Count unique HOUSEID by household size
+numadults_counts = (
+    dT.groupby("NUMADLT", dropna=False)["HOUSEID"]
+      .nunique()
+      .reset_index(name="NumAdultsinHH")
+      .sort_values("NUMADLT")
+)
+
+print(numadults_counts)
+```
+
+# Household type (single-adult, dual-adult, and multi-adult HH)
+```{python}
+# Make sure LIF_CYC is numeric
+dT["LIF_CYC"] = pd.to_numeric(dT["LIF_CYC"], errors="coerce")
+
+# Keep only rows with LIF_CYC in {3,4,5,6}
+dT = dT[dT["LIF_CYC"].isin([3, 4, 5, 6])].copy()
+
+# Create the new categorical variable
+dT["SingleAdult"] = np.where(dT["LIF_CYC"] == 3, 1, 0)
+
+# Count households by SingleAdult flag
+counts = dT["SingleAdult"].value_counts(dropna=False)
+
+num_single_adult = counts.get(1, 0)   # households with SingleAdult = 1
+num_other        = counts.get(0, 0)   # households with SingleAdult = 0
+total_hh         = num_single_adult + num_other
+
+portion = num_single_adult / total_hh if total_hh > 0 else np.nan
+
+print("Total households kept:", total_hh)
+print("SingleAdult households:", num_single_adult)
+print("Portion (share):", round(portion, 3))  # proportion, e.g. 0.273
+```
+
+# the age group of the oldest children (category)
+```{python}
+# Create OlderSibinHH variable
+dT['OlderSibinHH'] = np.where(dT['num1017inhh'] >= 1, 1, 0)
+```
+
+#	Dummy for work status of a respondant
+```{python}
+# Drop invalid WORKER values (-1, -9)
+dT = dT[~dT["WORKER"].isin([-1, -9])].copy()
+
+# Create IsWorker (1 if WORKER==1, 0 if WORKER==0)
+dT["IsWorker"] = (dT["WORKER"] == 1).astype(int)
+dT["IsWorker"].value_counts(dropna=False)
+```
+
+#	Dummy for gender(men/women) of a respondant
+```{python}
+# Create IsWomen (1 if female, 0 if male)
+dT["IsWomen"] = (dT["R_SEX_IMP"] == 2).astype(int)
+
+dT = dT[dT["R_SEX_IMP"].isin([1, 2])].copy()
+dT["IsWomen"] = (dT["R_SEX_IMP"] == 2).astype(int)
+
+dT["IsWomen"].value_counts(dropna=False)
+```
+
+#older in couple/ younger in couple
+```{python}
+# --- 0) Keep a copy of the original table (trip- or person-level) ---
+dT = dT.copy()
+
+# --- 1) Coerce needed fields to numeric ---
+for c in ["R_RELAT", "R_AGE_IMP", "LIF_CYC"]:
+    dT[c] = pd.to_numeric(dT[c], errors="coerce")
+
+# --- 2) Build a PERSON-LEVEL view from dT (handles trip-level too) ---
+persons = (
+    dT[["HOUSEID","PERSONID","R_RELAT","R_AGE_IMP","LIF_CYC"]]
+      .drop_duplicates(["HOUSEID","PERSONID"])
+)
+
+# --- 3) Identify one SELF and one SPOUSE per household ---
+selfs = (
+    persons.loc[persons["R_RELAT"] == 1, ["HOUSEID","PERSONID","R_AGE_IMP"]]
+           .drop_duplicates("HOUSEID")
+           .rename(columns={"PERSONID":"SELF_ID","R_AGE_IMP":"SELF_AGE"})
+)
+spouses = (
+    persons.loc[persons["R_RELAT"] == 2, ["HOUSEID","PERSONID","R_AGE_IMP"]]
+           .drop_duplicates("HOUSEID")
+           .rename(columns={"PERSONID":"SP_ID","R_AGE_IMP":"SP_AGE"})
+)
+
+pairs = selfs.merge(spouses, on="HOUSEID", how="inner")
+
+# --- 4) Roles for the two partners (no dicts, no overwrite hazards) ---
+self_role = np.where(
+    pairs["SELF_AGE"].notna() & pairs["SP_AGE"].notna() & (pairs["SELF_AGE"] < pairs["SP_AGE"]),
+    "YoungerinCouple",
+    np.where(
+        pairs["SELF_AGE"].notna() & pairs["SP_AGE"].notna() & (pairs["SELF_AGE"] > pairs["SP_AGE"]),
+        "OlderinCouple",
+        "TieInCouple"
+    )
+)
+sp_role = np.where(
+    pairs["SELF_AGE"].notna() & pairs["SP_AGE"].notna() & (pairs["SP_AGE"] < pairs["SELF_AGE"]),
+    "YoungerinCouple",
+    np.where(
+        pairs["SELF_AGE"].notna() & pairs["SP_AGE"].notna() & (pairs["SP_AGE"] > pairs["SELF_AGE"]),
+        "OlderinCouple",
+        "TieInCouple"
+    )
+)
+
+roles_long = pd.concat(
+    [
+        pd.DataFrame({"HOUSEID": pairs["HOUSEID"], "PERSONID": pairs["SELF_ID"], "CoupleRole": self_role}),
+        pd.DataFrame({"HOUSEID": pairs["HOUSEID"], "PERSONID": pairs["SP_ID"],   "CoupleRole": sp_role}),
+    ],
+    ignore_index=True
+)
+
+# --- 5) Merge roles back to PERSON-LEVEL view ---
+persons = persons.merge(roles_long, on=["HOUSEID","PERSONID"], how="left")
+
+# COUPLE flag and your Single rule (LIF_CYC in {3,5} for respondent R_RELAT==1)
+persons["COUPLE"] = persons["CoupleRole"].notna().astype("Int64")
+persons["Single"] = ((persons["R_RELAT"] == 1) & (persons["LIF_CYC"].isin([3,5]))).astype("Int64")
+
+# If Single by definition, clear couple info
+persons.loc[persons["Single"] == 1, ["COUPLE","CoupleRole"]] = [0, pd.NA]
+
+# Final 4-category variable (person-level)
+persons["CoupleStatus"] = persons["CoupleRole"].fillna("Single")
+persons["CoupleStatus"] = pd.Categorical(
+    persons["CoupleStatus"],
+    categories=["YoungerinCouple","OlderinCouple","TieInCouple","Single"],
+    ordered=False
+)
+
+# --- 6) If dT is trip-level, propagate person labels back to dT ---
+dT = dT.merge(persons[["HOUSEID","PERSONID","CoupleStatus","COUPLE","Single"]],
+              on=["HOUSEID","PERSONID"], how="left")
+
+# --- 7) Sanity checks ---
+print("PERSON-LEVEL (unique persons) distribution:")
+print(persons["CoupleStatus"].value_counts(dropna=False))
+
+yc = (persons["CoupleStatus"] == "YoungerinCouple").sum()
+oc = (persons["CoupleStatus"] == "OlderinCouple").sum()
+print("Younger vs Older (persons):", yc, oc)
+
+print("\nTRIP-/ROW-LEVEL (original dT) distribution:")
+print(dT["CoupleStatus"].value_counts(dropna=False))
+```
+```{python}
+# --- 6b) TOUR-LEVEL label from person labels ---
+# Assumption: TOURID is unique within (HOUSEID, PERSONID).
+# If a tour accidentally mixes people, we flag it below.
+
+if "TOURID" not in dT.columns:
+    raise KeyError("TOURID column not found in dT")
+
+# 1) Check for mixed-person tours (should be zero)
+mixed_tours = (
+    dT.groupby(["HOUSEID","TOURID"])["PERSONID"].nunique()
+      .reset_index(name="n_persons_in_tour")
+)
+n_mixed = (mixed_tours["n_persons_in_tour"] > 1).sum()
+if n_mixed > 0:
+    print(f"WARNING: {n_mixed} tours contain trips from multiple PERSONID. "
+          "TourCoupleStatus will be set from the modal person within the tour.")
+
+# 2) Build a unique tour table, bringing the person's CoupleStatus
+tour_keys = ["HOUSEID","PERSONID","TOURID"]
+tour_base = (
+    dT[tour_keys].dropna(subset=["TOURID"]).drop_duplicates(tour_keys)
+    .merge(
+        persons[["HOUSEID","PERSONID","CoupleStatus"]],
+        on=["HOUSEID","PERSONID"], how="left"
+    )
+)
+
+# --- 3) Build TOUR-LEVEL status (collision-safe) ---
+
+tour_keys = ["HOUSEID","PERSONID","TOURID"]
+
+if "TOURID" not in dT.columns:
+    raise KeyError("TOURID column not found in dT")
+
+# Check for mixed-person tours (diagnostic only)
+mixed_tours = (
+    dT.groupby(["HOUSEID","TOURID"])["PERSONID"].nunique()
+      .reset_index(name="n_persons_in_tour")
+)
+n_mixed = int((mixed_tours["n_persons_in_tour"] > 1).sum())
+if n_mixed > 0:
+    print(f"WARNING: {n_mixed} tours contain trips from multiple PERSONID. "
+          "TourCoupleStatus will be set to the modal value within the tour.")
+
+# Work on a tiny frame to avoid suffix collisions
+tmp = (
+    dT[tour_keys].dropna(subset=["TOURID"]).drop_duplicates()
+      .merge(
+          persons[["HOUSEID","PERSONID","CoupleStatus"]],
+          on=["HOUSEID","PERSONID"], how="left", validate="m:1"
+      )
+)
+
+def _mode_or_first(vals):
+    vals = [v for v in vals if pd.notna(v)]
+    if not vals:
+        return pd.NA
+    counts = {}
+    order = []
+    for v in vals:
+        if v not in counts:
+            counts[v] = 0
+            order.append(v)
+        counts[v] += 1
+    return max(order, key=lambda k: counts[k])
+
+tour_status = (
+    tmp.groupby(tour_keys, as_index=False)["CoupleStatus"]
+       .agg(TourCoupleStatus=_mode_or_first)
+)
+
+# Keep the same categorical order as person-level (optional but nice)
+cat_order = ["YoungerinCouple","OlderinCouple","TieInCouple","Single"]
+tour_status["TourCoupleStatus"] = pd.Categorical(
+    tour_status["TourCoupleStatus"], categories=cat_order, ordered=False
+)
+
+# Merge back to trips
+dT = dT.merge(
+    tour_status[["HOUSEID","PERSONID","TOURID","TourCoupleStatus"]],
+    on=["HOUSEID","PERSONID","TOURID"], how="left", validate="m:1"
+)
+
+# Sanity checks
+print("\nTOUR-LEVEL distribution:")
+print(tour_status["TourCoupleStatus"].value_counts(dropna=False))
+
+# Cross-check against person label (differences usually mean mixed-person tours)
+mismatch = (
+    tour_status.merge(persons[["HOUSEID","PERSONID","CoupleStatus"]],
+                      on=["HOUSEID","PERSONID"], how="left")
+               .query("TourCoupleStatus != CoupleStatus and TourCoupleStatus.notna() and CoupleStatus.notna()")
+)
+if not mismatch.empty:
+    print(f"Note: {len(mismatch)} tours have a tour label different from the person's label (likely mixed-person tours).")
+```
+
+
+
+# Maximum number of accompanied children 0-17, 0-9, 10-17 per journey
+```{python}
+# 0) Ensure numeric
+for c in ["PartyNumu10", "PartyNum1017"]:
+    dT[c] = pd.to_numeric(dT[c], errors="coerce").fillna(0).astype(int)
+
+# 1) Create PartyNum017 = PartyNumu10 + PartyNum1017
+dT["PartyNum017"] = dT["PartyNumu10"] + dT["PartyNum1017"]
+
+# 2) Per-TourId max counts and consistency checks
+per_tour = (
+    dT.groupby("TOURID", as_index=True)
+      .agg(
+          max_u10=("PartyNumu10", "max"),
+          min_u10=("PartyNumu10", "min"),
+          consistent_u10=("PartyNumu10", lambda s: s.nunique() == 1),
+
+          max_1017=("PartyNum1017", "max"),
+          min_1017=("PartyNum1017", "min"),
+          consistent_1017=("PartyNum1017", lambda s: s.nunique() == 1),
+
+          max_017=("PartyNum017", "max"),
+      )
+)
+
+# Optional: quickly view any inconsistencies
+inconsist_u10   = per_tour.loc[~per_tour["consistent_u10"]]
+inconsist_1017  = per_tour.loc[~per_tour["consistent_1017"]]
+
+per_tour["consistent_u10"].all(), per_tour["consistent_1017"].all()
+
+num_tours = len(per_tour)
+num_incons_u10  = (~per_tour["consistent_u10"]).sum()
+num_incons_1017 = (~per_tour["consistent_1017"]).sum()
+num_tours, num_incons_u10, num_incons_1017
+```
+
+# Travel time in minutes (travel time + activity time = total tour duration) - less than 12 H
+```{python}
+# --- 1) Ensure numeric (keeps leading zeros irrelevant because we convert properly)
+dT["STRTTIME"] = pd.to_numeric(dT["STRTTIME"], errors="coerce")
+dT["ENDTIME"]  = pd.to_numeric(dT["ENDTIME"],  errors="coerce")
+
+# --- 2) Converter from HHMM (0000–2359) to minutes since midnight
+def hhmm_to_minutes(x):
+    if pd.isna(x):
+        return np.nan
+    x = int(x)
+    hh, mm = divmod(x, 100)
+    # Validate time
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return np.nan
+    return hh * 60 + mm
+
+start_min = dT["STRTTIME"].apply(hhmm_to_minutes)
+end_min   = dT["ENDTIME"].apply(hhmm_to_minutes)
+
+# --- 3) Compute per-trip duration in minutes with midnight wrap
+# (end - start) % 1440 gives 0..1439 minutes; handles trips crossing midnight
+dT["TravelTimeMinutes"] = (end_min - start_min) % (24 * 60)
+
+# Optional: if you want to treat identical times as missing instead of 0:
+# dT.loc[(~start_min.isna()) & (~end_min.isna()) & (start_min == end_min), "TravelTimeMinutes"] = np.nan
+
+# --- 4) Recompute total per TOURID and merge back
+tour_time = (
+    dT.groupby("TOURID", as_index=False)
+      .agg(TotalTravelTimeMinutes=("TravelTimeMinutes", "sum"))
+)
+dT = dT.merge(tour_time, on="TOURID", how="left")
+
+# --- 5) (Optional) sanity checks
+print(dT["TravelTimeMinutes"].describe())            # should be 0..1439 now, no negatives
+```
+```{python}
+# --- Ensure numeric and handle missing ---
+dT["DWELTIME"] = pd.to_numeric(dT.get("DWELTIME"), errors="coerce").fillna(0)
+
+# (You already have this from earlier; shown for clarity)
+# dT["TravelTimeMinutes"] = ...  # per-trip travel duration in minutes (0..1439)
+
+# --- 1) Total *activity* time per tour (sum of DWELTIME) ---
+dT["TotalActivityTimeMinutes"] = (
+    dT.groupby("TOURID")["DWELTIME"].transform("sum")
+)
+
+# Compute per-TOURID total directly onto dT (no merge needed)
+dT["TotalTravelTimeMinutes"] = (
+    dT.groupby("TOURID")["TravelTimeMinutes"].transform("sum")
+)
+
+# --- (Optional) Total tour time budget = activity + travel ---
+dT["TourTimeMinutes"] = (
+    dT["TotalActivityTimeMinutes"] + dT["TotalTravelTimeMinutes"]
+)
+
+# --- Quick sanity checks ---
+# Should be 1 unique value per TOURID for each total
+assert dT.groupby("TOURID")["TotalActivityTimeMinutes"].nunique().eq(1).all()
+assert dT.groupby("TOURID")["TotalTravelTimeMinutes"].nunique().eq(1).all()
+
+# Inspect a few columns
+print(
+    dT[["TOURID", "TRIPID", "TravelTimeMinutes", "DWELTIME",
+        "TotalTravelTimeMinutes", "TotalActivityTimeMinutes",
+        "TourTimeMinutes"]].head()
+)
+
+
+print([c for c in dT.columns if "TourTimeMinutes" in c])
+```
+```{python}
+print(dT[["TOURID", "TourTimeMinutes"]].drop_duplicates().head())
+print(dT["TourTimeMinutes"].describe())
+print([c for c in dT.columns if "TourTimeMinutes" in c])
+```
+
+```{python}
+# --- Define bins and labels for total travel time ---
+bins = [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360, 390, 420, 450, 480, 510, 540, 570, 600, 630, 660, 690,720, float('inf')]
+labels = [
+    '0–30', '30–60','60–90', '90–120','120–150', '150–180', '180–210', '210–240', '240–270', '270–300', '300–330','330–360',
+    '360–390', '390–420','420–450', '450–480', '480–510', '510–540', '540–570', '570–600', '600–630', '630–660', '660–690', '690–720', '720+'
+]
+
+# --- Apply categorical binning ---
+dT['TourTimeCategory'] = pd.cut(
+    dT['TourTimeMinutes'],
+    bins=bins,
+    labels=labels,
+    right=False
+)
+
+# --- Count frequency per category ---
+category_counts = dT['TourTimeCategory'].value_counts().sort_index()
+
+# --- Plot histogram ---
+plt.figure(figsize=(8, 4))
+sns.barplot(x=category_counts.index, y=category_counts.values, color='skyblue')
+plt.xlabel("Total Tour Duration (minutes)")
+plt.ylabel("Count of Tours")
+plt.title("Distribution of Total Tour Duration Categories")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+```
+```{python}
+# --- Categorize total travel time ---
+dT['TourTimeCategory'] = pd.cut(
+    dT['TourTimeMinutes'],
+    bins=bins,
+    labels=labels,
+    right=False
+)
+
+# --- Create frequency table ---
+table = (
+    dT['TourTimeCategory']
+    .value_counts()
+    .sort_index()
+    .rename_axis("TourTimeCategory")
+    .reset_index(name="Count")
+)
+
+# --- Add percentage column ---
+table["Percent"] = (table["Count"] / table["Count"].sum() * 100).round(2)
+
+# --- Display as table ---
+print(table)
+```
+```{python}
+# Measure before filtering
+before = len(dT)
+
+# Drop >720
+dT = dT[dT["TourTimeMinutes"] <= 720].copy()
+
+# Measure after
+after = len(dT)
+print(f"Removed {before - after} rows ({before} → {after}).")
+```
+# Journey complexity 
+```{python}
+# Compute number of trips per tour
+dT["n_trips_in_tour"] = dT.groupby("TOURID")["TRIPID"].transform("count")
+
+# Create TourComplexity
+#  - 0 if exactly 2 trips (home → X → home)
+#  - 1 if more than 2 trips (home → X → Y → home, etc.)
+dT["TourComplexity"] = (dT["n_trips_in_tour"] > 2).astype(int)
+
+# Quick check
+print(dT[["TOURID", "n_trips_in_tour", "TourComplexity"]].drop_duplicates().head())
+
+print(dT["TourComplexity"].value_counts())
+```
+
+# HH income (Q1-Q4)
+```{python}
+# Ensure numeric
+dT["HHFAMINC"] = pd.to_numeric(dT["HHFAMINC"], errors="coerce")
+
+# Drop invalid codes
+dT = dT[~dT["HHFAMINC"].isin([-7, -8, -9])].copy()
+
+# Define mapping from codes to approximate midpoint ($)
+income_midpoints = {
+    1:  7500,      # <10k → midpoint 7.5k
+    2:  12500,     # 10k–15k
+    3:  20000,     # 15k–25k
+    4:  30000,     # 25k–35k
+    5:  42500,     # 35k–50k
+    6:  62500,     # 50k–75k
+    7:  87500,     # 75k–100k
+    8:  112500,    # 100k–125k
+    9:  137500,    # 125k–150k
+    10: 175000,    # 150k–200k
+    11: 225000,    # 200k+
+}
+
+# Map to new continuous variable
+dT["HHFAMINC_cont"] = dT["HHFAMINC"].map(income_midpoints)
+
+# Optional: sanity check
+print(dT[["HHFAMINC", "HHFAMINC_cont"]].drop_duplicates().sort_values("HHFAMINC"))
+
+dT["HHFAMINC_cont"] = dT["HHFAMINC_cont"] / 1000
+```
+```{python}
+# --- 1) Build income (thousand DKK/year) from HHFAMINC_cont (USD) ---
+dT["IncHouseh"] = pd.to_numeric(dT["HHFAMINC_cont"], errors="coerce") 
+
+# Drop NaNs for plotting/table work
+income = dT["IncHouseh"].dropna()
+
+# --- 2) Histogram with quartile lines ---
+quantiles = income.quantile([0.25, 0.5, 0.75])
+
+plt.figure(figsize=(8, 4))
+sns.histplot(income, kde=True, bins=300, edgecolor='black')
+plt.title('Tour Counts by Household Income')
+plt.xlabel('Household Income (1000 USD)')
+plt.ylabel('Count')
+
+for q, val in quantiles.items():
+    plt.axvline(x=val, linestyle='--', label=f'{int(q*100)}th percentile: {val:.0f}')
+
+# Deduplicate legend entries
+handles, labels = plt.gca().get_legend_handles_labels()
+unique_labels = dict(zip(labels, handles))
+plt.legend(unique_labels.values(), unique_labels.keys())
+
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+```
+```{python}
+# --- 3) Quartiles as labels on IncHouseh ---
+# duplicates="drop" prevents errors if many equal values land on a boundary
+dT = dT.copy()
+dT["inc_quant"] = pd.qcut(dT["IncHouseh"], q=4, labels=['Q1','Q2','Q3','Q4'], duplicates='drop')
+dT = dT.dropna(subset=['inc_quant'])
+
+# --- 4) Count unique sessions/households by quartile ---
+# Use SessionId if available; else fall back to HOUSEID; else just count rows.
+if "SessionId" in dT.columns:
+    key_col = "SessionId"
+elif "HOUSEID" in dT.columns:
+    key_col = "HOUSEID"
+else:
+    key_col = None
+
+if key_col is not None:
+    session_counts = (
+        dT.groupby("inc_quant")[key_col]
+          .nunique()
+          .reset_index(name="UniqueSessions")
+    )
+else:
+    session_counts = (
+        dT.groupby("inc_quant")
+          .size()
+          .reset_index(name="UniqueSessions")
+    )
+
+total_sessions = session_counts["UniqueSessions"].sum()
+session_counts["Percentage"] = (session_counts["UniqueSessions"] / total_sessions * 100).round(2)
+
+print(session_counts)
+```
+
+```{python}
+# --- 5) Same histogram, but mark the qcut bin edges explicitly ---
+# (retbins gives you the exact cut points used)
+_, bins = pd.qcut(dT["IncHouseh"].dropna(), q=4, retbins=True, labels=['Q1','Q2','Q3','Q4'], duplicates='drop')
+
+plt.figure(figsize=(8, 4))
+sns.histplot(income, kde=True, bins=300, edgecolor='black')
+plt.title('Tour Counts by Household Income')
+plt.xlabel('Household Income (1000 USD)')
+plt.ylabel('Count')
+
+for i, val in enumerate(bins[1:-1], start=1):  # skip min and max
+    plt.axvline(x=val, linestyle='--', label=f'Q{i} cutoff: {val:.0f}')
+
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+```
+
+#Mode
+```{python}
+# Ensure TRPTRANS is numeric
+dT["TRPTRANS"] = pd.to_numeric(dT["TRPTRANS"], errors="coerce")
+
+# Codes to drop
+drop_codes = [-7, -8, -9, 7, 9, 10, 13, 19, 97]
+
+# Remove unwanted rows
+dT = dT[~dT["TRPTRANS"].isin(drop_codes)].copy()
+
+# Create TRIPMODE
+dT["TRIPMODE"] = pd.NA
+
+dT.loc[dT["TRPTRANS"] == 1, "TRIPMODE"] = "Walk"
+dT.loc[dT["TRPTRANS"] == 2, "TRIPMODE"] = "Bicycle"
+
+# Car modes
+car_codes = [3, 4, 5, 6, 8, 18]
+dT.loc[dT["TRPTRANS"].isin(car_codes), "TRIPMODE"] = "Car"
+
+# Transit modes
+transit_codes = [11, 12, 14, 15, 16, 17, 20]
+dT.loc[dT["TRPTRANS"].isin(transit_codes), "TRIPMODE"] = "Transit"
+
+# Check result
+print(dT["TRIPMODE"].value_counts(dropna=False))
+
+print(sorted(dT.loc[dT["TRIPMODE"].isna(), "TRPTRANS"].unique()))
+```
+```{python}
+# 0) Make sure these are in good shape
+dT["TravelTimeMinutes"] = pd.to_numeric(dT["TravelTimeMinutes"], errors="coerce").fillna(0)
+# TRIPMODE should already be one of: "Walk", "Bicycle", "Car", "Transit" (or NA)
+
+# 1) Sum travel time by TOURID × TRIPMODE
+mode_time = (
+    dT.dropna(subset=["TRIPMODE"])  # ignore trips with unknown mode for PRIMMODE
+      .groupby(["TOURID", "TRIPMODE"], dropna=False)["TravelTimeMinutes"]
+      .sum()
+      .reset_index(name="ModeTravelTimeMinutes")
+)
+
+# 2) Tie-break rule (you can customize this order)
+#    If two modes have the same summed time, prefer Transit > Car > Bicycle > Walk
+precedence = {"Transit": 1, "Car": 2, "Bicycle": 3, "Walk": 4}
+mode_time["mode_rank"] = mode_time["TRIPMODE"].map(precedence).fillna(99).astype(int)
+
+# 3) Pick the primary mode per TOURID
+PRIMMODE_per_tour = (
+    mode_time.sort_values(
+        ["TOURID", "ModeTravelTimeMinutes", "mode_rank"],
+        ascending=[True, False, True]
+    )
+    .drop_duplicates(subset=["TOURID"], keep="first")
+    .rename(columns={"TRIPMODE": "PRIMMODE"})
+    [["TOURID", "PRIMMODE"]]
+)
+
+# 4) Attach PRIMMODE back to all trips in the tour
+dT = dT.merge(PRIMMODE_per_tour, on="TOURID", how="left")
+
+# --- Optional fallbacks ---
+# If a tour has all trips with unknown TRIPMODE or all 0 minutes,
+# PRIMMODE will be NaN. You can optionally fill those with the most
+# frequent mode by count (if you prefer), like this:
+
+if dT["PRIMMODE"].isna().any():
+    # Most frequent mode by trip count within the tour as a fallback
+    mode_count = (
+        dT.dropna(subset=["TRIPMODE"])
+          .groupby(["TOURID", "TRIPMODE"]).size()
+          .reset_index(name="n")
+    )
+    mode_count["mode_rank"] = mode_count["TRIPMODE"].map(precedence).fillna(99).astype(int)
+    PRIMMODE_fallback = (
+        mode_count.sort_values(["TOURID", "n", "mode_rank"], ascending=[True, False, True])
+                  .drop_duplicates("TOURID")[["TOURID", "TRIPMODE"]]
+                  .rename(columns={"TRIPMODE": "PRIMMODE_fallback"})
+    )
+    dT = dT.merge(PRIMMODE_fallback, on="TOURID", how="left")
+    dT["PRIMMODE"] = dT["PRIMMODE"].fillna(dT["PRIMMODE_fallback"])
+    dT = dT.drop(columns=["PRIMMODE_fallback"], errors="ignore")
+
+# Quick checks
+print(dT[["TOURID", "TRIPMODE", "TravelTimeMinutes", "PRIMMODE"]].head())
+print(dT["PRIMMODE"].value_counts(dropna=False))
+```
+
+#	Purpose of tour (the purpose of the longest staying time of the tour)
+```{python}
+# Ensure WHYTRP1S is numeric
+dT["WHYTRP1S"] = pd.to_numeric(dT["WHYTRP1S"], errors="coerce")
+
+# Codes to drop
+drop_codes = [1, 20, 97]
+
+# Remove unwanted rows
+dT = dT[~dT["WHYTRP1S"].isin(drop_codes)].copy()
+
+# Create TRIPPURP
+dT["TRIPPURP"] = pd.NA
+
+dT.loc[dT["WHYTRP1S"] == 10, "TRIPPURP"] = "Work"
+dT.loc[dT["WHYTRP1S"] == 70, "TRIPPURP"] = "Chauffeuring"
+
+Shoppingerrands_codes = [30, 40]
+dT.loc[dT["WHYTRP1S"].isin(Shoppingerrands_codes), "TRIPPURP"] = "ShoppingErrands"
+
+leisuresocial_codes = [50, 80]
+dT.loc[dT["WHYTRP1S"].isin(leisuresocial_codes), "TRIPPURP"] = "LeisureSocial"
+
+# Check result
+print(dT["TRIPPURP"].value_counts(dropna=False))
+
+print(sorted(dT.loc[dT["TRIPPURP"].isna(), "WHYTRP1S"].unique()))
+```
+```{python}
+# 0) Ensure inputs are clean
+dT["DWELTIME"]  = pd.to_numeric(dT["DWELTIME"], errors="coerce").fillna(0)
+# TRIPPURP already created in your code: Work / Chauffeuring / ShoppingErrands / LeisureSocial (or NA)
+
+# 1) Sum activity time by TOURID × TRIPPURP
+purp_time = (
+    dT.dropna(subset=["TRIPPURP"])  # ignore unknown purpose rows for PRIMPURP
+      .groupby(["TOURID", "TRIPPURP"], dropna=False)["DWELTIME"]
+      .sum()
+      .reset_index(name="PurpActivityTimeMinutes")
+)
+
+# 2) Tie-break rule when totals tie (customize as you like)
+#    Example precedence: Work > Chauffeuring > ShoppingErrands > LeisureSocial
+purp_precedence = {"Work": 1, "Chauffeuring": 2, "ShoppingErrands": 3, "LeisureSocial": 4}
+purp_time["purp_rank"] = purp_time["TRIPPURP"].map(purp_precedence).fillna(99).astype(int)
+
+# 3) Pick the primary purpose per TOURID
+primpurp_per_tour = (
+    purp_time.sort_values(
+        ["TOURID", "PurpActivityTimeMinutes", "purp_rank"],
+        ascending=[True, False, True]
+    )
+    .drop_duplicates(subset=["TOURID"], keep="first")
+    .rename(columns={"TRIPPURP": "PRIMPURP"})
+    [["TOURID", "PRIMPURP"]]
+)
+
+# 4) Attach PRIMPURP back to all trips in the tour
+dT = dT.merge(primpurp_per_tour, on="TOURID", how="left")
+
+# --- Optional fallback(s) ---
+# If a tour has only NA TRIPPURP (or all DWELTIME == 0), PRIMPURP can be NA.
+# Fallback 1: choose the most frequent TRIPPURP within the tour (with same precedence).
+if dT["PRIMPURP"].isna().any():
+    purp_count = (
+        dT.dropna(subset=["TRIPPURP"])
+          .groupby(["TOURID", "TRIPPURP"]).size()
+          .reset_index(name="n")
+    )
+    purp_count["purp_rank"] = purp_count["TRIPPURP"].map(purp_precedence).fillna(99).astype(int)
+    primpurp_fb = (
+        purp_count.sort_values(["TOURID", "n", "purp_rank"], ascending=[True, False, True])
+                  .drop_duplicates("TOURID")[["TOURID", "TRIPPURP"]]
+                  .rename(columns={"TRIPPURP": "PRIMPURP_fb"})
+    )
+    dT = dT.merge(primpurp_fb, on="TOURID", how="left")
+    dT["PRIMPURP"] = dT["PRIMPURP"].fillna(dT["PRIMPURP_fb"])
+    dT.drop(columns=["PRIMPURP_fb"], inplace=True, errors="ignore")
+
+# --- Diagnostics ---
+print(dT[["TOURID","TRIPID","TRIPPURP","DWELTIME","PRIMPURP"]].head())
+print(dT["PRIMPURP"].value_counts(dropna=False))
+```
+```{python}
+purp_totals = purp_time.groupby("TOURID")["PurpActivityTimeMinutes"].sum().rename("TourActTime")
+purp_time = purp_time.merge(purp_totals, on="TOURID")
+purp_time["purp_share"] = purp_time["PurpActivityTimeMinutes"] / purp_time["TourActTime"].replace(0, pd.NA)
+```
+
+```{python}
+# Check uniqueness of PRIMPURP within each TOURID
+check = dT.groupby("TOURID")["PRIMPURP"].nunique()
+
+print("Tours with >1 primary purpose:", (check > 1).sum())
+print("Total tours:", check.size)
+```
+```{python}
+tour_prim = dT.drop_duplicates("TOURID")[["TOURID", "PRIMPURP"]]
+
+print(tour_prim["PRIMPURP"].value_counts(dropna=False))
+```
+```{python}
+print("Trip rows =", len(dT))
+print("Tours =", dT['TOURID'].nunique())
+print("Trip-level PRIMPURP count sum =", dT['PRIMPURP'].value_counts().sum())
+```
+
+
+
+# Save the full data
+```{python}
+# File paths
+folder_path = r"C:\Users\ohdaw\OneDrive - Harvard University\tu_data\us_nhts"
+output_file = os.path.join(folder_path, "us_data_before_compression_hh_0to9.csv")
+dT.to_csv(output_file, index=False, encoding="utf-8-sig")
+```
+
+# Saved the reduced dimention
+```{python}
+# Define file paths
+folder_path = r"C:\Users\ohdaw\OneDrive - Harvard University\tu_data\us_nhts"
+output_file = os.path.join(folder_path, "us_data_reduced_hh_0to9.csv")
+
+# Reduce to one row per JourneyId
+dTT = dT.groupby("TOURID").agg({
+    "HOUSEID": "first", 
+    "JourneyWithChildren": "first", 
+    "PRIMMODE" : "first", 
+    "TotalTravelTimeMinutes": "first", 
+    "TotalActivityTimeMinutes": "first", 
+    "TourTimeMinutes": "first", 
+    "PRIMPURP": "first", 
+    "IncHouseh": "first",
+    "inc_quant": "first",
+    "HHSIZE": "first",  
+    "NUMADLT": "first",  
+    "numu10inhh": "first", 
+    "num1017inhh": "first", 
+    "YOUNGCHILD": "first", 
+    "PartyNum1017": "first", 
+    "PartyNumu10": "first",  
+    "PartyNum1017": "first", 
+    "TourCoupleStatus": "first",
+    "IsWomen": "first",
+    "IsWorker": "first",
+    "TourComplexity": "first",
+    "R_AGE_IMP": "first"
+}).reset_index()
+
+# Save the reduced dataset
+dTT.to_csv(output_file, index=False, encoding="utf-8-sig")
+
+# Display first few rows
+print(dTT.head(10))
+```
+
+
+
+
+

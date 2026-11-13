@@ -1,0 +1,1020 @@
+---
+title: "variable_breakdown_1"
+author: "dawon"
+date: "2025-06-26"
+output: html_document
+---
+
+#import packages
+```{python setup, include=FALSE} 
+import pandas as pd
+import os
+import seaborn as sns
+import matplotlib.pyplot as plt
+```
+
+
+```{python, include=FALSE}
+# Define file paths
+folder_path = r"C:\Users\ohdaw\OneDrive - Harvard University\tu_data\us_nhts"
+file_path = os.path.join(folder_path, "us_data_reduced_hh_0to9_1.csv")
+#output_path = os.path.join(folder_path, ".csv")
+
+# Load dataset
+dt = pd.read_csv(file_path, encoding="utf-8-sig")
+```
+
+```{python}
+counts = dt.groupby('PRIMPURP')['TOURID'].nunique().sort_index()
+percentages = dt['PRIMPURP'].value_counts(normalize=True).sort_index() * 100
+
+purpose_summary = pd.DataFrame({
+    'PRIMPURP': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+purpose_summary['Percentage'] = purpose_summary['Percentage'].round(2)
+
+purpose_summary['Purpose'] = purpose_summary['PRIMPURP']
+
+purpose_summary = purpose_summary[['Purpose', 'Count', 'Percentage']]
+
+print(purpose_summary)
+```
+
+```{python, include=FALSE}
+dt_before = dt.copy()
+
+# Check original length
+initial_rows = len(dt)
+
+# Drop NAs step by step and count
+dt = dt.dropna(subset=['inc_quant'])
+after_inc = len(dt)
+dropped_inc = initial_rows - after_inc
+
+dt = dt.dropna(subset=['NUMADLT'])
+after_adults = len(dt)
+dropped_adults = after_inc - after_adults
+
+dt = dt.dropna(subset=['IsWorker'])
+after_worker = len(dt)
+dropped_worker = after_adults - after_worker
+
+dt = dt.dropna(subset=['TourCoupleStatus'])
+after_couple = len(dt)
+dropped_couple = after_worker - after_couple
+
+total_dropped = initial_rows - after_couple
+
+print("Dropped due to inc_quant:", dropped_inc)
+print("Dropped due to HousehNumAdults:", dropped_adults)
+print("Dropped due to IsWorker:", dropped_worker)
+print("Dropped due to OlderInCouple:", dropped_couple)
+print("Total dropped:", total_dropped)
+print("Remaining rows:", after_couple)
+
+# Count unique IDs after cleaning
+unique_journeys = dt["TOURID"].nunique()
+unique_sessions = dt["HOUSEID"].nunique()
+
+print(f"Unique TOURID: {unique_journeys}")
+print(f"Unique HOUSEID: {unique_sessions}")
+
+# Before dropping NAs
+initial_journeys = dt_before["TOURID"].nunique()
+initial_sessions = dt_before["HOUSEID"].nunique()
+
+# After dropping NAs (dt is your cleaned dataset)
+final_journeys = dt["TOURID"].nunique()
+final_sessions = dt["HOUSEID"].nunique()
+
+# Differences
+dropped_journeys = initial_journeys - final_journeys
+dropped_sessions = initial_sessions - final_sessions
+
+print("Unique TOURID before:", initial_journeys)
+print("Unique TOURID after:", final_journeys)
+print("Dropped TOURID:", dropped_journeys)
+
+print("Unique HOUSEID before:", initial_sessions)
+print("Unique HOUSEID after:", final_sessions)
+print("Dropped HOUSEID:", dropped_sessions)
+```
+```{python}
+# Count unique HOUSEID by inc_quant
+session_counts = (
+    dt.groupby("inc_quant")["HOUSEID"]
+       .nunique()
+       .reset_index(name="UniqueSessions")
+)
+
+# Add percentage column
+total_sessions = session_counts["UniqueSessions"].sum()
+session_counts["Percentage"] = (session_counts["UniqueSessions"] / total_sessions * 100).round(2)
+
+print(session_counts)
+```
+
+
+# Percentage of each purposes (1)
+```{python}
+counts = dt.groupby('PRIMPURP')['TOURID'].nunique().sort_index()
+percentages = dt['PRIMPURP'].value_counts(normalize=True).sort_index() * 100
+
+purpose_summary = pd.DataFrame({
+    'PRIMPURP': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+purpose_summary['Percentage'] = purpose_summary['Percentage'].round(2)
+
+purpose_summary['Purpose'] = purpose_summary['PRIMPURP']
+
+purpose_summary = purpose_summary[['Purpose', 'Count', 'Percentage']]
+
+print(purpose_summary)
+```
+
+```{python}
+duration_with_purpose = dt.copy()
+# --- Work ---
+subset = duration_with_purpose.loc[duration_with_purpose["PRIMPURP"] == "Work", "TourTimeMinutes"]
+
+plt.figure(figsize=(8,4))
+plt.hist(subset, bins=72, range=(0,720), edgecolor="black")
+plt.title("Tour Duration: Work")
+plt.xlabel("Minutes")
+plt.ylabel("Count")
+plt.grid(True, linestyle="--", alpha=0.5)
+plt.show()
+
+# --- LeisureSocial ---
+subset = duration_with_purpose.loc[duration_with_purpose["PRIMPURP"] == "LeisureSocial", "TourTimeMinutes"]
+
+plt.figure(figsize=(8,4))
+plt.hist(subset, bins=72, range=(0,720), edgecolor="black")
+plt.title("Tour Duration: LeisureSocial")
+plt.xlabel("Minutes")
+plt.ylabel("Count")
+plt.grid(True, linestyle="--", alpha=0.5)
+plt.show()
+
+# --- ShoppingErrands ---
+subset = duration_with_purpose.loc[duration_with_purpose["PRIMPURP"] == "ShoppingErrands", "TourTimeMinutes"]
+
+plt.figure(figsize=(8,4))
+plt.hist(subset, bins=72, range=(0,720), edgecolor="black")
+plt.title("Tour Duration: ShoppingErrands")
+plt.xlabel("Minutes")
+plt.ylabel("Count")
+plt.grid(True, linestyle="--", alpha=0.5)
+plt.show()
+
+# --- Chauffeuring ---
+subset = duration_with_purpose.loc[duration_with_purpose["PRIMPURP"] == "Chauffeuring", "TourTimeMinutes"]
+
+plt.figure(figsize=(8,4))
+plt.hist(subset, bins=72, range=(0,720), edgecolor="black")
+plt.title("Tour Duration: Chauffeuring")
+plt.xlabel("Minutes")
+plt.ylabel("Count")
+plt.grid(True, linestyle="--", alpha=0.5)
+plt.show()
+```
+
+
+# Distance/ Activity time of each purposes (1)
+```{python}
+purpose_stats = dt.groupby("PRIMPURP").agg(
+    Count=("TOURID", "nunique"),
+    AvgTransportTime_km=("TotalTravelTimeMinutes", "mean"),
+    MedianTransportTime_km=("TotalTravelTimeMinutes", "median"),
+    MinTransportTime_km=("TotalTravelTimeMinutes", "min"),
+    MaxTransportTime_km=("TotalTravelTimeMinutes", "max"),
+    StdTransportTime_km=("TotalTravelTimeMinutes", "std"),
+    AvgActivityTime_min=("TotalActivityTimeMinutes", "mean"),
+    MedianActivityTime_min=("TotalActivityTimeMinutes", "median"),
+    MinActivityTime_min=("TotalActivityTimeMinutes", "min"),
+    MaxActivityTime_min=("TotalActivityTimeMinutes", "max"),
+    StdActivityTime_min=("TotalActivityTimeMinutes", "std")
+).reset_index()
+
+purpose_stats["Purpose"] = purpose_stats["PRIMPURP"]
+
+purpose_stats = purpose_stats[
+    ["Purpose", "Count", "AvgTransportTime_km", "MedianTransportTime_km", "MinTransportTime_km", "MaxTransportTime_km", "StdTransportTime_km", "AvgActivityTime_min", "MedianActivityTime_min", "MinActivityTime_min", "MaxActivityTime_min", "StdActivityTime_min"]
+]
+
+purpose_stats = purpose_stats.round(2)
+```
+```{r}
+library(dplyr)
+library(knitr)
+library(reticulate)
+
+reticulate::py$purpose_stats |>
+  arrange(desc(Count)) |>
+  kable(digits = 2, caption = "Trip Purpose Summary Statistics")
+```
+
+
+# Percentage of each modes (1)
+```{python}
+counts = dt.groupby('PRIMMODE')['TOURID'].nunique().sort_index()
+percentages = dt['PRIMMODE'].value_counts(normalize=True).sort_index() * 100
+
+mode_summary = pd.DataFrame({
+    'PRIMMODE': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+mode_summary['Percentage'] = mode_summary['Percentage'].round(2)
+
+mode_summary['Mode'] = mode_summary['PRIMMODE']
+
+mode_summary = mode_summary[['Mode', 'Count', 'Percentage']]
+
+print(mode_summary)
+```
+
+# travel time of each modes (1)
+```{python}
+purpose_stats = dt.groupby("PRIMMODE").agg(
+    Count=("TOURID", "nunique"),
+    AvgTravelTime_min=("TourTimeMinutes", "mean"),
+    MedianTravelTime_min=("TourTimeMinutes", "median"),
+    MinTravelTime_min=("TourTimeMinutes", "min"),
+    MaxTravelTime_min=("TourTimeMinutes", "max"),
+    StdTravelTime_min=("TourTimeMinutes", "std")
+).reset_index()
+
+purpose_stats["Mode"] = purpose_stats["PRIMMODE"]
+
+purpose_stats = purpose_stats[
+    ["Mode", "Count", "AvgTravelTime_min", "MedianTravelTime_min", "MinTravelTime_min", "MaxTravelTime_min", "StdTravelTime_min"]
+]
+
+purpose_stats = purpose_stats.round(2)
+```
+```{r}
+reticulate::py$purpose_stats |>
+  arrange(desc(Count)) |>
+  kable(digits = 2, caption = "Mode Summary Statistics")
+```
+
+#  Number of Journey Types with children 0-10 (maybe 10-17 or not)
+```{python}
+counts = dt.groupby('JourneyWithChildren')['TOURID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Journey Type  with children 0-17': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+
+## Number of accompanied children on a journey 0-9
+```{python}
+counts = dt.groupby('acc_0_4')['TOURID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Number of accompanied children on a journey under 4y': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+## Number of accompanied children on a journey 5-9
+```{python}
+counts = dt.groupby('acc_5_9')['TOURID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Number of accompanied children on a journey age 5-9': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+
+## Number of accompanied children on a journey 0-9
+```{python}
+counts = dt.groupby('PartyNumu10')['TOURID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Number of accompanied children on a journey under 10y': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+## Number of accompanied children on a journey 10-17
+```{python}
+counts = dt.groupby('PartyNum1017')['TOURID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Number of accompanied children on a journey age 10-17': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+#  Number of accompanied children on a journey 0-17
+```{python}
+counts = dt.groupby('PartyNum017')['TOURID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Number of accompanied children on a journey 0-17': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+
+#These identities hold row-wise:
+#PartyNumu10 = acc_0_4 + acc_5_9
+#PartyNum017 = PartyNumu10 + PartyNum1017
+#But distributions don’t add across variables.
+```{python}
+tour = dt.drop_duplicates("TOURID")
+
+print("Check 0-9 identity:")
+print((tour["PartyNumu10"] == tour["acc_0_4"] + tour["acc_5_9"]).value_counts())
+
+print("\nCheck 0-17 identity:")
+print((tour["PartyNum017"] == tour["PartyNumu10"] + tour["PartyNum1017"]).value_counts())
+```
+```{python}
+joint = (
+    dt.drop_duplicates("TOURID")
+      .groupby(["acc_0_4","acc_5_9","PartyNumu10","PartyNum1017","PartyNum017"])
+      .size()
+      .reset_index(name="Tours")
+      .sort_values("Tours", ascending=False)
+)
+
+print(joint.head(20))
+```
+
+
+#  Number of children under 5 (0-4)y in a household
+```{python}
+counts = dt.groupby('YOUNGCHILD')['HOUSEID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Number of children under 5 (0-4)y in a household': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+
+#  Number of children under 5-9y in a household
+```{python}
+counts = dt.groupby('num_5_9')['HOUSEID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Number of children 5-9y in a household': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+
+#Number of younger Sibling(Age 0-9) in a HH
+```{python}
+counts = dt.groupby('numu10inhh')['HOUSEID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Number of younger Siblings (Age 0–9) in a HH': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.round(2)
+})
+print(summary)
+```
+
+#Number of Older Sibling(Age 10-17) in a HH
+```{python}
+counts = dt.groupby('num1017inhh')['HOUSEID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Number of Older Siblings (Age 10–17) in a HH': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.round(2)
+})
+print(summary)
+```
+
+```{python}
+counts = dt.groupby('NumChld')['HOUSEID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Number of children under 18y in a household': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+
+#These identities hold row-wise:
+#numu10inhh = YOUNGCHILD + num_5_9
+#NumChld = numu10inhh + num1017inhh
+#But distributions don’t add across variables.
+```{python, include=FALSE}
+tour = dt.drop_duplicates("TOURID")
+
+print("Check 0-9 identity:")
+print((tour["numu10inhh"] == tour["YOUNGCHILD"] + tour["num_5_9"]).value_counts())
+
+print("\nCheck 0-17 identity:")
+print((tour["NumChld"] == tour["numu10inhh"] + tour["num1017inhh"]).value_counts())
+```
+```{python}
+joint = (
+    dt.drop_duplicates("TOURID")
+      .groupby(["YOUNGCHILD","num_5_9","numu10inhh","num1017inhh","NumChld"])
+      .size()
+      .reset_index(name="Tours")
+      .sort_values("Tours", ascending=False)
+)
+
+print(joint.head(20))
+```
+
+
+# Number of adults in a HH
+```{python}
+counts = dt.groupby('NUMADLT')['HOUSEID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Number of adults in a household': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+
+
+
+# Journey complexity
+```{python}
+counts = dt.groupby('TourComplexity')['TOURID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Tour complexity': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+
+# Gender of the caregivers (1: Male/ 2: Female)
+```{python}
+counts = dt.groupby('IsWomen')['TOURID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Gender': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+
+# Work status of the caregivers (1: Worker/ 0: Non-worker)
+```{python}
+counts = dt.groupby('IsWorker')['TOURID'].nunique()
+percentages = counts / counts.sum() * 100
+
+summary = pd.DataFrame({
+    'Worker': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+summary['Percentage'] = summary['Percentage'].round(2)
+
+print(summary)
+```
+
+
+# Total Journey Time
+```{python}
+distance_by_journey = dt.groupby('TOURID')['TourTimeMinutes'].sum()
+
+# Plot histogram with 300 bins in the range 0–2000 km
+plt.figure(figsize=(8, 4))
+plt.hist(distance_by_journey, bins=72, range=(0, 720), color='skyblue', edgecolor='black')
+plt.xlabel('Journeys Duration (minutes)')
+plt.ylabel('Count')
+plt.title('Distribution of Journeys Duration Under 12h')
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
+```
+
+
+# Total Transport Time
+```{python}
+distance_by_journey = dt.groupby('TOURID')['TotalTravelTimeMinutes'].sum()
+
+# Plot histogram with 300 bins in the range 0–2000 km
+plt.figure(figsize=(8, 4))
+plt.hist(distance_by_journey, bins=70, range=(0, 350), color='skyblue', edgecolor='black')
+plt.xlabel('Total Time per Journey (minutes)')
+plt.ylabel('Count')
+plt.title('Distribution of Transport Time')
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
+```
+
+#Total Activity Time
+```{python}
+distance_by_journey = dt.groupby('TOURID')['TotalActivityTimeMinutes'].sum()
+
+# Plot histogram with 300 bins in the range 0–2000 km
+plt.figure(figsize=(8, 4))
+plt.hist(distance_by_journey, bins=72, range=(0, 720), color='skyblue', edgecolor='black')
+plt.xlabel('Total Time per Journey (minutes)')
+plt.ylabel('Count')
+plt.title('Distribution of Activity Time')
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+counts = dt.groupby(['PRIMPURP', 'PartyNumu10']).size().reset_index(name='Count')
+
+print(counts)
+```
+
+```{python}
+counts = dt.groupby(['PRIMPURP', 'JourneyWithChildren']).size().reset_index(name='Count')
+
+print(counts)
+```
+
+
+```{python}
+counts = dt.groupby(['PRIMPURP', 'SingleAinHH']).size().reset_index(name='Count')
+
+print(counts)
+```
+
+```{python}
+counts = dt.groupby(['PRIMPURP', 'NUMADLT']).size().reset_index(name='Count')
+
+print(counts)
+```
+
+```{python}
+journey_df = dt.groupby(['TOURID', 'PRIMPURP'])['R_AGE_IMP'].mean().reset_index()
+
+for age in journey_df['PRIMPURP'].unique():
+    subset = journey_df[journey_df['PRIMPURP'] == age]
+
+    plt.figure(figsize=(8, 4))
+    sns.histplot(subset['R_AGE_IMP'], bins=30, kde=True)
+    plt.title(f"Distribution of Caregiver's Age for Each Purpose: {age}")
+    plt.xlabel("Caregiver's Agee (years)")
+    plt.ylabel("Count")
+    plt.tight_layout()
+    plt.show()
+```
+
+
+```{python, include=FALSE}
+cols = [
+    'JourneyWithChildren',
+    'PRIMMODE',
+    'PRIMPURP',
+    'inc_quant',
+    'SingleAinHH',
+    'OlderSibinHH',
+    'YOUNGCHILD',
+    'num1017inhh',
+    'TourCoupleStatus',
+    'IsWomen',
+    'IsWorker',
+    'TourComplexity'
+]
+
+one_hot = pd.get_dummies(dt[cols], columns=cols[1:])
+
+summary = one_hot.groupby('JourneyWithChildren').sum()
+
+with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+  print(summary)
+```
+
+
+```{python}
+cols = [
+    'JourneyWithChildren',
+    'TourTimeMinutes',
+    'IncHouseh',
+    'HHSIZE',
+    'NUMADLT',
+    'YOUNGCHILD',
+    'num_5_9',
+    'numu10inhh',
+    'num1017inhh',
+    'acc_0_4',
+    'acc_5_9',
+    'PartyNumu10',
+    'PartyNum1017',
+    'PartyNum017',
+    'R_AGE_IMP'
+]
+
+summary_stats = dt[cols].groupby('JourneyWithChildren').agg(['mean', 'median', 'min', 'max', 'std'])
+
+with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    print(summary_stats)
+```
+
+```{python}
+# Step 1: Count number of unique TOURID's per HOUSEID
+journeys_per_session = dt.groupby('HOUSEID')['TOURID'].nunique()
+
+# Step 2: Count how many HOUSEIDs fall into each journey count group
+summary = journeys_per_session.value_counts().sort_index().reset_index()
+summary.columns = ['TOURID per HOUSEID', 'Count']
+
+# Step 3: Print the table
+print(summary)
+```
+<<<<<<< HEAD
+```{python, include=FALSE}
+# 1. How many times does each TOURID appear?
+journey_counts = dt['TOURID'].value_counts()
+print(journey_counts.head())
+
+# 2. Check if any TOURID is linked to >1 HOUSEID
+dup_journeys = dt.groupby('TOURID')['HOUSEID'].nunique()
+problem_journeys = dup_journeys[dup_journeys > 1]
+print(problem_journeys.head(), len(problem_journeys))
+```
+
+```{python, include=FALSE}
+df_filtered = dt.copy()
+
+print("Start rows:", len(df_filtered))
+
+def drop_and_report(df, col):
+    before = len(df)
+    df = df.dropna(subset=[col])
+    after = len(df)
+    print(f"Drop NA in {col}: {before-after} removed, {after} remaining")
+    return df
+
+df_filtered = drop_and_report(df_filtered, 'inc_quant')
+df_filtered = drop_and_report(df_filtered, 'NUMADLT')
+df_filtered = drop_and_report(df_filtered, 'numu10inhh')
+df_filtered = drop_and_report(df_filtered, 'YOUNGCHILD')
+df_filtered = drop_and_report(df_filtered, 'TourCoupleStatus')
+df_filtered = drop_and_report(df_filtered, 'IsWomen')
+df_filtered = drop_and_report(df_filtered, 'IsWorker')
+df_filtered = drop_and_report(df_filtered, 'TourComplexity')
+
+print("\nFinal rows:", len(df_filtered))
+print("Total dropped:", len(dt) - len(df_filtered))
+
+# 3. Save the filtered data
+output_file = os.path.join(folder_path, "us_data_reduced_hh_0to9_1_dropna.csv")
+df_filtered.to_csv(output_file, index=False, encoding="utf-8-sig")
+```
+
+```{python}
+jwc_counts = df_filtered['JourneyWithChildren'].value_counts()
+
+jwc_percentages = df_filtered['JourneyWithChildren'].value_counts(normalize=True) * 100
+
+jwc_summary = pd.DataFrame({
+    'Count': jwc_counts,
+    'Percentage': jwc_percentages
+})
+
+print(jwc_summary)
+```
+
+
+
+#Non-workers in purpose_work model
+```{python, include=FALSE}
+df_filtered_work = df_filtered[df_filtered['PRIMPURP'] == 'work']
+
+worker_counts = df_filtered_work['IsWorker'].value_counts()
+
+worker_percentages = df_filtered_work['IsWorker'].value_counts(normalize=True) * 100
+
+worker_summary = pd.DataFrame({
+    'Count': worker_counts,
+    'Percentage': worker_percentages
+})
+
+print(worker_summary)
+```
+
+
+
+```{python}
+import pandas as pd
+import numpy as np
+
+# Apply log transformation (replace 0 or negative with NaN to avoid math error)
+df_filtered['Log_TourTimeMinutes'] = np.log(df_filtered['TourTimeMinutes'].replace(0, np.nan))
+
+# Variables to summarize
+variables = ['Log_TourTimeMinutes', 'YOUNGCHILD', 'numu10inhh', 'num1017inhh',  'NUMADLT']
+
+# Compute min, max, mean, std
+summary_stats = df_filtered[variables].agg(['min', 'max', 'mean', 'std']).transpose()
+
+# Rename and format output
+summary_stats.index.name = 'Variable'
+summary_stats.reset_index(inplace=True)
+
+print(summary_stats)
+
+```
+
+```{python, include=FALSE}
+# List of variables to check
+variables = ['TourTimeMinutes', 'YOUNGCHILD', 'numu10inhh', 'num1017inhh',  'NUMADLT']
+
+# Count non-NaN values
+non_nan_counts = df_filtered[variables].count()
+
+# Convert to DataFrame for clearer presentation (optional)
+non_nan_counts_df = non_nan_counts.reset_index()
+non_nan_counts_df.columns = ['Variable', 'Non-NaN Count']
+
+print(non_nan_counts_df)
+```
+
+```{python}
+# Count of each category
+count_series = df_filtered['inc_quant'].value_counts(dropna=False).sort_index()
+
+# Percentage of each category
+percentage_series = df_filtered['inc_quant'].value_counts(normalize=True, dropna=False).sort_index() * 100
+
+# Combine into a DataFrame
+income_summary = pd.DataFrame({
+    'Count': count_series,
+    'Percentage': percentage_series.round(3)
+}).reset_index()
+
+income_summary.columns = ['Income Quintile', 'Count', 'Percentage (%)']
+
+print(income_summary)
+```
+```{python}
+c1017_counts = df_filtered['num1017inhh'].value_counts()
+
+c1017_percentages = df_filtered['num1017inhh'].value_counts(normalize=True) * 100
+
+c1017_summary = pd.DataFrame({
+    'Count': c1017_counts,
+    'Percentage': c1017_percentages
+})
+
+print(c1017_summary)
+```
+
+
+```{python, include=FALSE}
+print(df_filtered.columns.tolist())
+```
+```{python, include=FALSE}
+# Count NaN values for each variable in the list
+nan_counts = df_filtered.isna().sum()
+print(nan_counts.sort_values(ascending=False))
+```
+
+```{python}
+age_tour_distribution = df_filtered.groupby('TOURID')['R_AGE_IMP'].sum()
+
+# Plot histogram with 300 bins in the range 0–2000 km
+plt.figure(figsize=(8, 4))
+plt.hist(age_tour_distribution, bins=72, range=(0, 72), color='skyblue', edgecolor='black')
+plt.xlabel('Age')
+plt.ylabel('Count')
+plt.title('Distribution of caregiver Age')
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
+```
+
+```{python, include=FALSE}
+print("Rows:", len(df_filtered))
+print("Unique TOURID:", df_filtered["TOURID"].nunique())
+```
+
+
+
+### Final Data Summary
+```{python}
+counts = df_filtered.groupby('PRIMPURP')['TOURID'].nunique().sort_index()
+percentages = df_filtered['PRIMPURP'].value_counts(normalize=True).sort_index() * 100
+
+purpose_summary = pd.DataFrame({
+    'PRIMPURP': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+purpose_summary['Percentage'] = purpose_summary['Percentage'].round(2)
+
+purpose_summary['Purpose'] = purpose_summary['PRIMPURP']
+
+purpose_summary = purpose_summary[['Purpose', 'Count', 'Percentage']]
+
+print(purpose_summary)
+```
+
+```{python}
+counts = df_filtered.groupby('PRIMPURP')['HOUSEID'].nunique().sort_index()
+percentages = df_filtered['PRIMPURP'].value_counts(normalize=True).sort_index() * 100
+
+purpose_summary = pd.DataFrame({
+    'PRIMPURP': counts.index,
+    'Count': counts.values,
+    'Percentage': percentages.values
+})
+
+purpose_summary['Percentage'] = purpose_summary['Percentage'].round(2)
+
+purpose_summary['Purpose'] = purpose_summary['PRIMPURP']
+
+purpose_summary = purpose_summary[['Purpose', 'Count', 'Percentage']]
+
+print(purpose_summary)
+```
+
+```{python}
+duration_with_purpose = df_filtered.copy()
+# --- Work ---
+subset = duration_with_purpose.loc[duration_with_purpose["PRIMPURP"] == "Work", "TourTimeMinutes"]
+
+plt.figure(figsize=(8,4))
+plt.hist(subset, bins=72, range=(0,720), edgecolor="black")
+plt.title("Tour Duration: Work")
+plt.xlabel("Minutes")
+plt.ylabel("Count")
+plt.grid(True, linestyle="--", alpha=0.5)
+plt.show()
+
+# --- LeisureSocial ---
+subset = duration_with_purpose.loc[duration_with_purpose["PRIMPURP"] == "LeisureSocial", "TourTimeMinutes"]
+
+plt.figure(figsize=(8,4))
+plt.hist(subset, bins=72, range=(0,720), edgecolor="black")
+plt.title("Tour Duration: LeisureSocial")
+plt.xlabel("Minutes")
+plt.ylabel("Count")
+plt.grid(True, linestyle="--", alpha=0.5)
+plt.show()
+
+# --- ShoppingErrands ---
+subset = duration_with_purpose.loc[duration_with_purpose["PRIMPURP"] == "ShoppingErrands", "TourTimeMinutes"]
+
+plt.figure(figsize=(8,4))
+plt.hist(subset, bins=72, range=(0,720), edgecolor="black")
+plt.title("Tour Duration: ShoppingErrands")
+plt.xlabel("Minutes")
+plt.ylabel("Count")
+plt.grid(True, linestyle="--", alpha=0.5)
+plt.show()
+
+# --- Chauffeuring ---
+subset = duration_with_purpose.loc[duration_with_purpose["PRIMPURP"] == "Chauffeuring", "TourTimeMinutes"]
+
+plt.figure(figsize=(8,4))
+plt.hist(subset, bins=72, range=(0,720), edgecolor="black")
+plt.title("Tour Duration: Chauffeuring")
+plt.xlabel("Minutes")
+plt.ylabel("Count")
+plt.grid(True, linestyle="--", alpha=0.5)
+plt.show()
+```
+
+```{python, include=FALSE}
+cols = [
+    'JourneyWithChildren',
+    'PRIMMODE',
+    'PRIMPURP',
+    'inc_quant',
+    'SingleAinHH',
+    'OlderSibinHH',
+    'YOUNGCHILD',
+    'num1017inhh',
+    'TourCoupleStatus',
+    'IsWomen',
+    'IsWorker',
+    'TourComplexity'
+]
+
+one_hot = pd.get_dummies(df_filtered[cols], columns=cols[1:])
+
+summary = one_hot.groupby('JourneyWithChildren').sum()
+
+with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+  print(summary)
+```
+
+```{python}
+cols = [
+    'JourneyWithChildren',
+    'TourTimeMinutes',
+    'IncHouseh',
+    'HHSIZE',
+    'NUMADLT',
+    'YOUNGCHILD',
+    'num_5_9',
+    'numu10inhh',
+    'num1017inhh',
+    'acc_0_4',
+    'acc_5_9',
+    'PartyNumu10',
+    'PartyNum1017',
+    'PartyNum017',
+    'R_AGE_IMP'
+]
+
+summary_stats = df_filtered[cols].groupby('JourneyWithChildren').agg(['mean', 'median', 'min', 'max', 'std'])
+
+with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    print(summary_stats)
+```
+
+
+```{python}
+# Step 1: Count number of unique TOURID's per HOUSEID
+journeys_per_session = df_filtered.groupby('HOUSEID')['TOURID'].nunique()
+
+# Step 2: Count how many HOUSEIDs fall into each journey count group
+summary = journeys_per_session.value_counts().sort_index().reset_index()
+summary.columns = ['TOURID per HOUSEID', 'Count']
+
+# Step 3: Print the table
+print(summary)
+```
+
+

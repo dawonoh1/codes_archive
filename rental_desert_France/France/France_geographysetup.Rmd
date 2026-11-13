@@ -1,0 +1,230 @@
+---
+title: "GeographySetup_France"
+author: "dawon"
+date: "2024-11-14"
+output: html_document
+---
+
+```{r echo = T,error=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+#LOAD LIBRARIES------
+library(tidyverse)
+library(sf)
+library(dplyr)
+library(data.table)
+```
+
+
+##France Tracts
+```{r echo = T, results = 'hide'}
+#UPDATE SETTINGS AND FILE PATH------
+#file path 
+filepath_data <- "/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_IRIS/" 
+
+# Load the shapefile (adjust the path if necessary)
+france_tracts_shp <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/com_uu2020_2024/com_uu2020_2024.shp")
+
+# Load the CSV file containing additional data
+france_tracts <- read.csv("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/France_MunicipalComposition.csv")
+```
+
+```{r echo = T, results = 'hide'}
+# Join the shapefile data with the CSV data on the common 'codegeo' column
+# Assuming 'codegeo' is named the same in both datasets; if not, adjust accordingly
+france_tracts <- france_tracts_shp %>%
+  left_join(france_tracts, by = c("codgeo" = "codgeo"))
+
+# Drop the redundant columns and keep only the unique ones
+france_tracts <- france_tracts %>%
+  select(-ends_with(".x")) %>%
+  # Optionally, rename columns to remove the .x suffix if needed
+  rename_with(~ gsub("\\.y$", "", .))
+
+
+# Categorize places as city or suburban based on the columns 'UU2020' and 'statut_com_uu'
+france_tracts <- france_tracts %>%
+  mutate(
+    # Define municipality status based on statut_com_uu
+    municipality_status = case_when(
+      statut_com_uu == "H" ~ "Outside urban unit",
+      statut_com_uu == "C" ~ "Central city",
+      statut_com_uu == "B" ~ "Suburb",
+      statut_com_uu == "I" ~ "Isolated city",
+      TRUE ~ "Unknown"
+    ),
+    # Determine if place is city or suburb based on status
+    city = if_else(municipality_status == "Central city", 1, 0),
+    suburb = if_else(municipality_status == "Suburb", 1, 0)
+  )
+
+# Select relevant columns
+france_tracts <- france_tracts %>%
+  select(codgeo, libgeo, dep, reg, municipality_status, city, suburb, geometry, uu2020)
+```
+
+```{r}
+# CATEGORIZE TRACTS AS URBAN/RURAL ----
+# Since France does not use CBSAs, we’ll use urban/rural status at the commune level.
+# Assume communes outside urban units are rural.
+
+france_tracts <- france_tracts %>%
+  mutate(
+    rural = if_else(municipality_status == "Outside urban unit", 1, 0)
+  )
+
+# Summary of classification
+summary(france_tracts)
+
+# Save the processed data (if needed)
+# st_write(france_tracts, "C:/path/to/save/processed_france_places.shp")
+```
+
+##Urban Units
+```{r echo = T, results = 'hide'}
+# Load the shapefile for France urban units
+france_cbsa_shp <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/uu2020_2024/uu2020_2024.shp")
+
+# Load the CSV for French population data
+france_cbsa <- read.csv("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/France_UrbanUnit.csv")
+
+# Join the shapefile and population data on the common 'UU2020' column
+france_cbsa <- france_cbsa %>%
+  left_join(france_cbsa_shp, by = "uu2020")
+# Drop the redundant columns and keep only the unique ones
+france_cbsa <- france_cbsa %>%
+  select(-ends_with(".y")) %>%
+  # Optionally, rename columns to remove the .x suffix if needed
+  rename_with(~ gsub("\\.x$", "", .))
+```
+
+##Join Frances Tracts and Urban Units
+```{r echo = T, results = 'hide'}
+# Join the shapefile data with the CSV data on the common 'uu2020' column
+# Assuming 'uu2020' is named the same in both datasets; if not, adjust accordingly
+france_units <- france_tracts %>%
+  left_join(france_cbsa, by = c("uu2020" = "uu2020"))
+# Drop the redundant columns and keep only the unique ones
+france_units <- france_units %>%
+  select(-ends_with(".y")) %>%
+  # Optionally, rename columns to remove the .x suffix if needed
+  rename_with(~ gsub("\\.x$", "", .))
+```
+
+##Calcalate Population of Each Tracts
+```{r echo = T, results = 'hide'}
+# Define city and suburb status based on population range (e.g., 100,000 or more for cities)
+france_units <- france_units %>%
+  mutate(
+    # Define city status based on population size range
+    popcity = if_else(TUU2017 == 7 | TUU2017 == 8, 1, 0),  # Urban unit with 100,000+ inhabitants or Paris
+    city = if_else(popcity == 1, 1, 0),  # Mark as city
+    suburb = if_else(city == 1, 0, 1)  # Mark as suburb if not a city
+  )
+
+# Assuming you want to assign city/suburb status to tracts
+# Create centroid layer for tracts 
+#france_units$centroid <- st_centroid(france_units$geometry)  
+```
+
+```{r echo = T, results = 'hide'}
+# Rank urban units based on their population sizes and filter the top categories
+france_units_pop <- france_units %>%
+  mutate(
+    # Classify urban units by population size categories
+    pop_category = case_when(
+      TDUU2017 == 71 ~ "200,000 to 299,999",
+      TDUU2017 == 72 ~ "300,000 to 499,999",
+      TDUU2017 == 73 ~ "500,000 to 1,999,999",
+      TDUU2017 == 80 ~ "Paris",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  # Rank urban units by population size category
+  mutate(
+    pop_rank = case_when(
+      pop_category == "200,000 to 299,999" ~ 1,
+      pop_category == "300,000 to 499,999" ~ 2,
+      pop_category == "500,000 to 1,999,999" ~ 3,
+      pop_category == "Paris" ~ 4,
+      TRUE ~ NA_real_  # For other cases, assign NA
+    ),
+    # Add a flag for top population categories (500,000 to 1,999,999 and Paris)
+    pop_top = if_else(pop_category %in% c("500,000 to 1,999,999", "Paris"), 1, 0)
+  )##There are 154 500,000 to 1,999,999 and 1 Paris
+```
+
+##Join IRIS Assined to Each Tracts
+```{r echo = T, results = 'hide'}
+# Load the shapefiles
+iris_shp <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_IRIS/CONTOURS-IRIS_2-1__SHP__FRA_2020-01-01/CONTOURS-IRIS/1_DONNEES_LIVRAISON_2020-12-00282/CONTOURS-IRIS_2-1_SHP_LAMB93_FXX-2020/CONTOURS-IRIS.shp")
+com_shp <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/com_uu2020_2024/com_uu2020_2024.shp")
+
+# Ensure both shapefiles are in the same CRS
+if (st_crs(iris_shp) != st_crs(com_shp)) {
+  com_shp <- st_transform(com_shp, st_crs(iris_shp))
+}
+
+# Compute centroids of CODE_IRIS polygons
+iris_centroids <- st_centroid(iris_shp)
+
+# Perform a spatial join to add 'codgeo' from com_shp to iris_shp
+iris_with_codgeo <- st_join(iris_centroids, com_shp, join = st_within)
+
+# Save the updated shapefile with 'codgeo' added
+st_write(iris_with_codgeo, "C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_CONTOURS-IRIS.shp")
+```
+```{r echo = T, results = 'hide'}
+# Ensure both datasets are sf objects
+# Assuming france_units_pop is an sf object and includes spatial geometries
+# Ensure both layers are in the same CRS
+if (st_crs(iris_with_codgeo) != st_crs(france_units_pop)) {
+  france_units_pop <- st_transform(france_units_pop, st_crs(iris_with_codgeo))
+}
+
+# Perform the spatial join using 'st_join'
+# This will match geometries based on spatial relationships
+iris_with_population <- st_join(iris_with_codgeo, france_units_pop, join = st_intersects)
+
+iris_with_population <- iris_with_population %>%
+  select(-ends_with(".y")) %>%
+  # Optionally, rename columns to remove the .x suffix if needed
+  rename_with(~ gsub("\\.x$", "", .))
+
+# Check the result
+head(iris_with_population)
+
+# Optionally, save the resulting shapefile
+st_write(iris_with_population, "C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Population.shp")
+```
+
+
+```{r echo = T, results = 'hide'}
+# Ensure that both datasets share the same CRS
+if (st_crs(iris_with_codgeo) != st_crs(france_units_pop)) {
+  france_units_pop <- st_transform(france_units_pop, st_crs(iris_with_codgeo))
+}
+
+# Perform spatial join to retain polygon geometries and discard points
+joined_data <- st_join(france_units_pop, iris_with_codgeo, join = st_intersects, left = TRUE)
+
+# Assuming 'CODE_IR' is the relevant column for merging purposes and keeping additional attributes
+# Adjust as necessary to ensure it's logically correct.
+
+# Write the result as a shapefile, retaining polygon geometries
+st_write(joined_data, "C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_PolygonsOnly.shp", append = FALSE)
+```
+
+```{r echo = T, results = 'hide'}
+# Drop geometry from joined_data and merge attributes with geometry from iris_shp using correct join columns
+combined_data <- iris_shp %>%
+  select(CODE_IRIS, geometry) %>%  # Keep only necessary geometry and join columns from iris_shp
+  left_join(
+    st_drop_geometry(joined_data),  # Use st_drop_geometry() to facilitate non-spatial joins
+    by = c("CODE_IRIS" = "CODE_IRIS")  # Ensure this matches correctly in both datasets
+  )
+
+# Convert back to an sf object explicitly
+combined_data <- st_as_sf(combined_data, sf_column_name = "geometry")
+
+# Save the updated data as a shapefile, if desired
+st_write(combined_data, "C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_Combined_Data.shp", append = FALSE)
+```

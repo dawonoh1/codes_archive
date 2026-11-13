@@ -1,0 +1,720 @@
+---
+title: "France Rental Deserts — Fill-in-the-Blanks"
+author: "dawon"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(sf)
+library(knitr)
+library(kableExtra)
+```
+
+```{r file-paths}
+# ── UPDATE THIS ONE PATH ──────────────────────────────────────────────────────
+base_path <- "C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/"
+# ─────────────────────────────────────────────────────────────────────────────
+
+path_pop_shp    <- paste0(base_path, "Updated_IRIS_with_Population.shp")
+path_rental_csv <- paste0(base_path, "france_rental.csv")
+path_income_csv <- paste0(base_path, "Updated_IRIS_with_Income.csv")
+path_sru_csv    <- paste0(base_path, "sru_inventory_2022.csv")   # downloaded below
+```
+
+---
+
+# 0  Download SRU data (run once)
+
+The official SRU inventory is published by the Ministère de la Transition
+écologique on data.gouv.fr. The chunk below downloads the **2022 vintage**
+(matching your 2021 Census) directly into your project folder. Run it once;
+afterwards it just reads the cached file.
+
+```{r download-sru}
+if (!file.exists(path_sru_csv)) {
+  # Direct CSV link — "Communes et inventaire SRU" (situation au 1er janvier 2022)
+  # Source: https://www.data.gouv.fr/datasets/communes-et-inventaire-sru
+  sru_url <- "https://www.data.gouv.fr/api/1/datasets/r/6c9e0f6c-dfbe-4c59-bd63-58e4e2c9b5d9"
+  download.file(sru_url, destfile = path_sru_csv, mode = "wb")
+  message("SRU data downloaded to ", path_sru_csv)
+} else {
+  message("SRU file already present — skipping download.")
+}
+```
+
+---
+
+# 1  Load and prepare data
+
+```{r load-data}
+# Population / housing shapefile
+iris_pop <- st_read(path_pop_shp, quiet = TRUE)
+
+# Rental variables
+france_rental <- read_csv(path_rental_csv, show_col_types = FALSE)
+
+# Join and clean (mirrors France_DiverseIndex.Rmd exactly)
+iris_df <- iris_pop %>%
+  left_join(france_rental, by = c("CODE_IR" = "IRIS")) %>%
+  select(-ends_with(".y")) %>%
+  rename_with(~ gsub("\\.x$", "", .)) %>%
+  mutate(
+    across(c(P21_PMEN, rental_sh, P21_RP, P21_RPMAISON,
+             P21_RPAPPART, P21_LOGVAC, P21_LOG), as.numeric)
+  ) %>%
+  st_drop_geometry()
+
+# Three-way tenure classification
+iris_df <- iris_df %>%
+  mutate(
+    tenure_type = case_when(
+      rental_sh <  20 ~ "Rental Desert",
+      rental_sh >= 80 ~ "High-Rental",
+      TRUE            ~ "Mixed-Tenure"
+    ),
+    tenure_type = factor(tenure_type,
+                         levels = c("Rental Desert", "Mixed-Tenure", "High-Rental"))
+  )
+
+# Geographic category from binary flags (city / suburb / rural)
+iris_df <- iris_df %>%
+  mutate(
+    geo_type = case_when(
+      city   == 1 ~ "Central city",
+      suburb == 1 ~ "Suburb",
+      TRUE        ~ "Isolated / outside urban unit"
+    )
+  )
+
+cat("IRIS loaded:", nrow(iris_df), "\n")
+cat("Tenure breakdown:\n")
+print(table(iris_df$tenure_type, useNA = "ifany"))
+```
+
+---
+
+# 2  TABLE 1 — IRIS characteristics by tenure category
+
+## 2.1  Coverage
+
+```{r t1-coverage}
+t1_coverage <- iris_df %>%
+  group_by(tenure_type) %>%
+  summarise(n_iris = n(), .groups = "drop") %>%
+  mutate(share_pct = round(n_iris / sum(n_iris) * 100, 1))
+
+kable(t1_coverage,
+      col.names = c("Tenure type", "N IRIS", "Share of all IRIS (%)"),
+      caption   = "Table 1a. IRIS counts by tenure category")
+```
+
+## 2.2  Housing structure averages
+
+```{r t1-housing}
+t1_housing <- iris_df %>%
+  group_by(tenure_type) %>%
+  summarise(
+    avg_rental_sh   = round(mean(rental_sh,                      na.rm = TRUE), 1),
+    avg_primary_res = round(mean(P21_RP,                         na.rm = TRUE), 0),
+    avg_sh_maison   = round(mean(P21_RPMAISON / P21_RP * 100,    na.rm = TRUE), 1),
+    avg_sh_appart   = round(mean(P21_RPAPPART / P21_RP * 100,    na.rm = TRUE), 1),
+    avg_sh_vacant   = round(mean(P21_LOGVAC   / P21_LOG  * 100,  na.rm = TRUE), 1),
+    .groups         = "drop"
+  )
+
+kable(t1_housing,
+      col.names = c("Tenure type", "Avg rental share (%)",
+                    "Avg primary residences", "Avg single-family (%)",
+                    "Avg apartments (%)", "Avg vacancy rate (%)"),
+      caption   = "Table 1b. Housing structure averages by tenure category")
+```
+
+## 2.3  Geographic distribution
+
+```{r t1-geography}
+t1_geo <- iris_df %>%
+  group_by(tenure_type, geo_type) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(tenure_type) %>%
+  mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = tenure_type, values_from = pct, values_fill = 0)
+
+kable(t1_geo,
+      col.names = c("Geographic type",
+                    "Rental Desert", "Mixed-Tenure", "High-Rental"),
+      caption   = "Table 1c. Geographic distribution by tenure category (%)")
+```
+
+---
+
+# 3  TABLE 2 — Spatial distribution across the 100 largest urban units
+
+## 3.1  Top 100 UUs by population
+
+```{r uu-top100}
+top_100_uu <- iris_df %>%
+  group_by(UU2020) %>%
+  summarise(total_pop = sum(P21_PMEN, na.rm = TRUE),
+            lib2020   = first(lib2020), .groups = "drop") %>%
+  filter(!str_detect(lib2020, "^Commune hors")) %>%   # ← add this
+  arrange(desc(total_pop)) %>%
+  slice_head(n = 100)
+```
+
+## 3.2  Metro-level stats: rental share, rental desert share, divergence
+
+```{r uu-stats}
+iris_top100 <- iris_df %>% filter(UU2020 %in% top_100_uu$UU2020)
+
+metro_shares <- iris_top100 %>%
+  group_by(UU2020) %>%
+  summarise(metro_rental_sh = mean(rental_sh, na.rm = TRUE),
+            metro_owner_sh  = 100 - metro_rental_sh,
+            .groups         = "drop")
+
+# IRIS divergence (same formula as France_DiverseIndex.Rmd)
+iris_diverg <- iris_top100 %>%
+  left_join(metro_shares, by = "UU2020") %>%
+  mutate(
+    owner_sh       = 100 - rental_sh,
+    divergence_val = rental_sh * log(rental_sh / metro_rental_sh) +
+                     owner_sh  * log(owner_sh  / metro_owner_sh)
+  )
+
+# UU-level: population-weighted divergence + rental desert share
+uu_stats <- iris_diverg %>%
+  group_by(UU2020) %>%
+  summarise(
+    lib2020         = first(lib2020),
+    total_pop       = sum(P21_PMEN, na.rm = TRUE),
+    metro_rental_sh = round(first(metro_rental_sh), 1),
+    rd_share_pct    = round(mean(rental_sh < 20, na.rm = TRUE) * 100, 1),
+    avg_divergence  = round(
+      weighted.mean(divergence_val, w = P21_PMEN, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  mutate(total_pop_000 = round(total_pop / 1000, 0))
+```
+
+## 3.3  Top 10 most divergent + bottom 10 least divergent
+
+```{r t2-top-bottom}
+top10    <- uu_stats %>% arrange(desc(avg_divergence)) %>% slice_head(n = 10) %>%
+  mutate(group = "Top 10 (most divergent)")
+bottom10 <- uu_stats %>% arrange(avg_divergence)      %>% slice_head(n = 10) %>%
+  mutate(group = "Bottom 10 (least divergent)")
+
+t2_table <- bind_rows(top10, bottom10) %>%
+  select(group, lib2020, total_pop_000, rd_share_pct,
+         metro_rental_sh, avg_divergence)
+
+kable(t2_table,
+      col.names = c("Group", "Urban Unit", "Population (000s)",
+                    "Rental Desert Share (%)", "Metro Rental Share (%)",
+                    "Divergence Index"),
+      caption   = "Table 2. Rental desert geography across urban units") %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  pack_rows("Top 10 — Most Segregated by Housing Tenure",    1,  10) %>%
+  pack_rows("Bottom 10 — Least Segregated by Housing Tenure", 11, 20)
+```
+
+## 3.4  Cross-check against Paris (should be ≈ 7.91 from DiverseIndex.html)
+
+```{r t2-paris-check}
+paris <- uu_stats %>% filter(UU2020 == "00851")
+cat("Paris divergence (this script):", paris$avg_divergence, "\n")
+cat("Paris divergence (DiverseIndex.html):", 7.91, "\n")
+cat("Note: small difference is expected — DiverseIndex.Rmd uses unweighted mean;\n",
+    "      this script uses population-weighted mean.\n")
+```
+
+---
+
+# 4  TABLE 3 — Correlations
+
+## 4.1  Income divergence (mirrors France_DiverseIndex.Rmd)
+
+```{r income-divergence}
+income_raw <- read_csv(path_income_csv, show_col_types = FALSE)
+
+income_df <- income_raw %>%
+  filter(UU2020 %in% top_100_uu$UU2020) %>%
+  mutate(
+    income_cat = case_when(
+      DEC_MED21 <  20000 ~ "Lower",
+      DEC_MED21 <  40000 ~ "Middle",
+      !is.na(DEC_MED21)  ~ "Higher",
+      TRUE               ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(income_cat))
+
+income_shares <- income_df %>%
+  group_by(UU2020, income_cat) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(UU2020) %>%
+  mutate(iris_share = count / sum(count)) %>%
+  ungroup()
+
+metro_income <- income_shares %>%
+  group_by(income_cat) %>%
+  summarise(metro_share = mean(iris_share, na.rm = TRUE), .groups = "drop")
+
+income_divergence <- income_shares %>%
+  left_join(metro_income, by = "income_cat") %>%
+  mutate(component = iris_share * log(iris_share / metro_share)) %>%
+  group_by(UU2020) %>%
+  summarise(income_div_idx = sum(component, na.rm = TRUE), .groups = "drop")
+```
+
+## 4.2  Building age entropy (mirrors France_DiverseIndex.Rmd)
+
+```{r building-age}
+bldg_age_uu <- iris_df %>%
+  filter(UU2020 %in% top_100_uu$UU2020) %>%
+  mutate(across(c(P21_RP_ACH19, P21_RP_ACH45, P21_RP_ACH70,
+                  P21_RP_ACH90, P21_RP_ACH05, P21_RP_ACH18,
+                  P21_RP_ACHTOT), as.numeric)) %>%
+  mutate(
+    s19 = P21_RP_ACH19 / P21_RP_ACHTOT,
+    s45 = P21_RP_ACH45 / P21_RP_ACHTOT,
+    s70 = P21_RP_ACH70 / P21_RP_ACHTOT,
+    s90 = P21_RP_ACH90 / P21_RP_ACHTOT,
+    s05 = P21_RP_ACH05 / P21_RP_ACHTOT,
+    s18 = P21_RP_ACH18 / P21_RP_ACHTOT
+  ) %>%
+  rowwise() %>%
+  mutate(
+    bldg_entropy = -sum(
+      c(s19, s45, s70, s90, s05, s18) *
+      log(c(s19, s45, s70, s90, s05, s18)),
+      na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  group_by(UU2020) %>%
+  summarise(bldg_age_div_idx = mean(bldg_entropy, na.rm = TRUE), .groups = "drop")
+```
+
+## 4.3  Correlations
+
+```{r t3-correlations}
+corr_data <- uu_stats %>%
+  select(UU2020, avg_divergence) %>%
+  left_join(income_divergence, by = "UU2020") %>%
+  left_join(bldg_age_uu,       by = "UU2020") %>%
+  filter(!is.na(avg_divergence),
+         !is.na(income_div_idx),
+         !is.na(bldg_age_div_idx))
+
+cat("N urban units for correlations:", nrow(corr_data), "\n\n")
+
+cor1 <- cor.test(corr_data$avg_divergence, corr_data$income_div_idx,  method = "pearson")
+cor2 <- cor.test(corr_data$avg_divergence, corr_data$bldg_age_div_idx, method = "pearson")
+
+cat("Housing Tenure × Income divergence:\n")
+cat("  r =", round(cor1$estimate, 3), " p =", format.pval(cor1$p.value, digits = 3), "\n\n")
+cat("Housing Tenure × Building age entropy:\n")
+cat("  r =", round(cor2$estimate, 3), " p =", format.pval(cor2$p.value, digits = 3), "\n")
+```
+
+```{r t3-table}
+t3 <- tibble(
+  Pairing = c("Tenure divergence × Income divergence",
+              "Tenure divergence × Building age entropy"),
+  r       = round(c(cor1$estimate, cor2$estimate), 3),
+  CI      = c(
+    paste0("[", round(cor1$conf.int[1],3), ", ", round(cor1$conf.int[2],3), "]"),
+    paste0("[", round(cor2$conf.int[1],3), ", ", round(cor2$conf.int[2],3), "]")
+  ),
+  N       = c(cor1$parameter + 2, cor2$parameter + 2),
+  p       = c(format.pval(cor1$p.value, digits = 2),
+              format.pval(cor2$p.value, digits = 2))
+)
+
+kable(t3,
+      col.names = c("Pairing", "Pearson r", "95% CI", "N", "p-value"),
+      caption   = "Table 3. Correlations: housing tenure divergence × socioeconomic measures") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+---
+
+# 5  TABLE 4 — SRU compliance and rental share (OLS)
+
+## 5.1  Load and inspect SRU data
+
+```{r load-sru}
+# The CSV uses semicolons as delimiter and Latin-1 encoding (typical for French gov files)
+sru_raw <- read_delim(path_sru_csv, delim = ";", locale = locale(encoding = "latin1"),
+                      show_col_types = FALSE)
+
+# Inspect what we have
+cat("Rows:", nrow(sru_raw), "  Cols:", ncol(sru_raw), "\n")
+cat("Column names:\n")
+print(names(sru_raw))
+```
+
+## 5.2  Clean SRU and join to commune-level rental share
+
+```{r sru-prep}
+library(readxl)
+library(janitor)
+
+path_sru_csv <- paste0(base_path, "sru_inventory_2022.csv")
+
+if (!file.exists(path_sru_csv)) {
+  download.file(
+    "https://www.data.gouv.fr/api/1/datasets/r/adbd736b-b24f-495e-8a9f-70689c44446c",
+    destfile = path_sru_csv, mode = "wb"
+  )
+}
+
+# Row 1 is blank, row 2 is headers → skip = 1
+sru_raw <- read_csv(
+  path_sru_csv,
+  skip   = 1,
+  locale = locale(encoding = "latin1"),
+  show_col_types = FALSE
+) %>%
+  clean_names()   # snake_case, strips accents from é/è etc.
+
+# Parse rate columns: "52,95 %" → 52.95
+parse_pct <- function(x) {
+  as.numeric(str_replace_all(x, "[^0-9,]", "") %>% str_replace(",", "."))
+}
+
+sru <- sru_raw %>%
+  transmute(
+    codgeo        = str_pad(as.character(code_insee_commune), 5, "left", "0"),
+    taux_lls      = parse_pct(taux_sru_au_01_01_2023),
+    objectif_lls  = parse_pct(taux_cible_commune_2023_2025),
+    # commune_deficitaire_2024 == 0 means the commune meets its target
+    sru_compliant = if_else(commune_deficitaire_2024 == 0, 1L, 0L,
+                            missing = NA_integer_)
+  ) %>%
+  filter(!is.na(codgeo), !is.na(taux_lls))
+
+cat("SRU communes after cleaning:", nrow(sru), "\n")
+cat("Compliant:",     sum(sru$sru_compliant == 1, na.rm = TRUE), "\n")
+cat("Non-compliant:", sum(sru$sru_compliant == 0, na.rm = TRUE), "\n")
+print(head(sru))
+```
+
+## 5.3  Commune-level rental share (from IRIS data)
+
+```{r commune-rental}
+# codgeo in your IRIS data is the 5-digit commune code
+commune_rental <- iris_df %>%
+  mutate(codgeo = str_pad(as.character(codgeo), 5, "left", "0")) %>%
+  group_by(codgeo) %>%
+  summarise(
+    commune_rental_sh = mean(rental_sh,            na.rm = TRUE),
+    n_iris            = n(),
+    geo_type          = first(geo_type),
+    UU2020            = first(UU2020),
+    .groups           = "drop"
+  )
+
+# Join SRU onto commune rental data
+policy_df <- commune_rental %>%
+  left_join(sru, by = "codgeo") %>%
+  filter(!is.na(taux_lls))     # keep only SRU-covered communes
+
+cat("Communes with SRU data:", nrow(policy_df), "\n")
+```
+
+## 5.4  OLS regressions
+
+```{r}
+sru_raw <- read_csv(
+  path_sru_csv,
+  skip          = 1,           # row 1 is blank/title; row 2 is the real header
+  locale        = locale(encoding = "latin1"),
+  show_col_types = FALSE,
+  col_select     = -1          # drop the empty leading column
+)
+
+parse_pct <- function(x) {
+  as.numeric(str_replace_all(x, c("," = ".", "\\s*%" = "", "\\s" = "")))
+}
+
+sru <- sru_raw %>%
+  rename(
+    codgeo      = Code_INSEE_commune,
+    taux_lls    = Taux_SRU_au_01_01_2023,
+    taux_cible  = Taux_cible_commune_2023_2025,
+    deficitaire = `Commune_déficitaire_2024`
+  ) %>%
+  mutate(
+    codgeo        = str_pad(as.character(codgeo), 5, "left", "0"),
+    taux_lls      = parse_pct(taux_lls),
+    taux_cible    = parse_pct(taux_cible),
+    sru_compliant = as.integer(deficitaire == 0)
+  ) %>%
+  select(codgeo, taux_lls, taux_cible, sru_compliant)
+
+cat("SRU communes:", nrow(sru), "\n")
+cat("Compliant:", sum(sru$sru_compliant, na.rm = TRUE),
+    " | Non-compliant:", sum(sru$sru_compliant == 0, na.rm = TRUE), "\n")
+```
+
+
+```{r t4-regressions}
+library(broom)
+
+# Model 1: SRU compliance (binary: meets target or not)
+lm1 <- lm(commune_rental_sh ~ sru_compliant, data = policy_df)
+
+# Model 2: Actual LLS rate (continuous — how much social housing already exists)
+lm2 <- lm(commune_rental_sh ~ taux_lls, data = policy_df)
+
+# Model 3: Both together
+lm3 <- lm(commune_rental_sh ~ sru_compliant + taux_lls, data = policy_df)
+
+# Model 4: By geography (central city vs suburb)
+lm4 <- lm(commune_rental_sh ~ sru_compliant * geo_type, data = policy_df)
+
+cat("── Model 1: SRU compliance (binary) ──────────────────────────────\n")
+print(summary(lm1))
+
+cat("\n── Model 2: Actual LLS rate ──────────────────────────────────────\n")
+print(summary(lm2))
+
+cat("\n── Model 3: Both ─────────────────────────────────────────────────\n")
+print(summary(lm3))
+
+cat("\n── Model 4: Compliance × Geography ──────────────────────────────\n")
+print(summary(lm4))
+```
+
+## 5.5  Table 4 formatted output
+
+```{r t4-table}
+coef_table <- bind_rows(
+  tidy(lm1, conf.int = TRUE) %>% mutate(model = "M1: SRU compliance"),
+  tidy(lm2, conf.int = TRUE) %>% mutate(model = "M2: LLS rate"),
+  tidy(lm3, conf.int = TRUE) %>% mutate(model = "M3: Both")
+) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    across(c(estimate, conf.low, conf.high), ~ round(., 2)),
+    p.value  = format.pval(p.value, digits = 2),
+    stars    = case_when(
+      as.numeric(p.value) < 0.001 ~ "***",
+      as.numeric(p.value) < 0.01  ~ "**",
+      as.numeric(p.value) < 0.05  ~ "*",
+      TRUE                        ~ ""
+    )
+  ) %>%
+  select(model, term, estimate, conf.low, conf.high, p.value, stars)
+
+kable(coef_table,
+      col.names = c("Model", "Variable", "β (pp)", "CI low", "CI high",
+                    "p-value", ""),
+      caption   = "Table 4. SRU policy indicators and commune-level rental share (OLS)") %>%
+  kable_styling(bootstrap_options = c("striped","hover"))
+```
+
+---
+
+# 6  Export all values (copy-paste into Word document)
+
+```{r export}
+cat("════ TABLE 1 ═══════════════════════════════════\n")
+print(t1_coverage)
+cat("\n"); print(t1_housing)
+cat("\n"); print(t1_geo)
+
+cat("\n════ TABLE 2 ═══════════════════════════════════\n")
+print(as.data.frame(t2_table))
+
+cat("\n════ TABLE 3 ═══════════════════════════════════\n")
+print(as.data.frame(t3))
+
+cat("\n════ TABLE 4 ═══════════════════════════════════\n")
+print(as.data.frame(coef_table))
+```
+
+
+-----------
+7. Checking the threshold
+```{r eval=FALSE, include=FALSE}
+uu_stats %>% summarise(min_rental = min(metro_rental_sh))
+# Should be > 20 to justify the threshold
+```
+```{r eval=FALSE, include=FALSE}
+top_100_uu %>% nrow()
+top_100_uu %>% tail(10)   # see what the smallest included UUs are
+```
+```{r eval=FALSE, include=FALSE}
+top_100_uu %>%
+  summarise(
+    n          = n(),
+    pop_max    = max(total_pop),
+    pop_min    = min(total_pop),
+    pop_median = median(total_pop)
+  )
+
+# Also: where does the distribution drop off?
+top_100_uu %>%
+  arrange(desc(total_pop)) %>%
+  mutate(rank = row_number()) %>%
+  filter(rank %in% c(10,25,50,75,100)) %>%
+  select(rank, lib2020, total_pop)
+```
+
+
+-----------
+8. DIAGNOSTIC: income file coverage
+```{r eval=FALSE, include=FALSE}
+income_raw <- read_csv(path_income_csv, show_col_types = FALSE)
+
+cat("Total rows in income file:", nrow(income_raw), "\n")
+cat("Columns:\n"); print(names(income_raw))
+
+cat("\nUnique UU2020 codes in income file:",
+    n_distinct(income_raw$UU2020), "\n")
+
+cat("Top-100 UUs with ANY income data:",
+    sum(top_100_uu$UU2020 %in% income_raw$UU2020), "\n")
+
+income_raw %>%
+  filter(UU2020 %in% top_100_uu$UU2020) %>%
+  group_by(UU2020) %>%
+  summarise(
+    n_iris        = n(),
+    n_with_income = sum(!is.na(DEC_MED21)),
+    pct_coverage  = round(n_with_income / n_iris * 100, 1),
+    .groups       = "drop"
+  ) %>%
+  arrange(pct_coverage) %>%
+  print(n = 20)
+```
+```{r eval=FALSE, include=FALSE}
+# ── Step 0: check coverage for your actual top-100 UUs ───────────────────────
+income_full <- read_csv(
+  paste0(base_path, "Updated_France_Rental_with_Income.csv"),
+  locale         = locale(encoding = "latin1"),
+  show_col_types = FALSE
+) %>%
+  rename(CODE_IR = IRIS) %>%
+  mutate(
+    UU2020    = as.character(UU2020),
+    DEC_MED21 = as.numeric(DEC_MED21)
+  )
+
+# Coverage per UU among your top-100
+coverage_check <- income_full %>%
+  filter(UU2020 %in% top_100_uu$UU2020) %>%
+  group_by(UU2020) %>%
+  summarise(
+    lib2020       = first(na.omit(top_100_uu$lib2020[top_100_uu$UU2020 == cur_group()$UU2020])),
+    n_iris_total  = n(),
+    n_with_income = sum(!is.na(DEC_MED21)),
+    pct_coverage  = round(n_with_income / n_iris_total * 100, 1),
+    .groups       = "drop"
+  ) %>%
+  arrange(pct_coverage)
+
+cat("UUs in top-100 with income coverage:\n")
+cat("  Full (100%)   :", sum(coverage_check$pct_coverage == 100), "\n")
+cat("  Partial (>0%) :", sum(coverage_check$pct_coverage > 0 &
+                             coverage_check$pct_coverage < 100), "\n")
+cat("  None (0%)     :", sum(coverage_check$pct_coverage == 0), "\n\n")
+
+# Show UUs with 0% coverage — these drive the N limitation
+cat("UUs with NO income data:\n")
+print(coverage_check %>% filter(pct_coverage == 0) %>%
+      left_join(top_100_uu %>% select(UU2020, lib2020), by = "UU2020") %>%
+      select(UU2020, lib2020.y, n_iris_total))
+```
+
+```{r}
+# ── Step 1: income divergence using all available IRIS ───────────────────────
+income_top100 <- income_full %>%
+  filter(
+    UU2020 %in% top_100_uu$UU2020,
+    !is.na(DEC_MED21)
+  ) %>%
+  mutate(
+    income_cat = case_when(
+      DEC_MED21 <  20000 ~ "Lower",
+      DEC_MED21 <  40000 ~ "Middle",
+      TRUE               ~ "Higher"
+    )
+  )
+
+cat("IRIS with income data across top-100 UUs:", nrow(income_top100), "\n")
+cat("UUs represented:", n_distinct(income_top100$UU2020), "\n\n")
+
+# IRIS share of each income category within each UU
+income_shares <- income_top100 %>%
+  group_by(UU2020, income_cat) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(UU2020) %>%
+  mutate(iris_share = count / sum(count)) %>%
+  ungroup()
+
+# Reference: average distribution across all UUs with data
+metro_income_ref <- income_shares %>%
+  group_by(income_cat) %>%
+  summarise(metro_share = mean(iris_share, na.rm = TRUE), .groups = "drop")
+
+# Income divergence index per UU
+income_divergence <- income_shares %>%
+  left_join(metro_income_ref, by = "income_cat") %>%
+  mutate(component = iris_share * log(iris_share / metro_share)) %>%
+  group_by(UU2020) %>%
+  summarise(
+    income_div_idx = sum(component, na.rm = TRUE),
+    n_iris_income  = sum(count),
+    .groups        = "drop"
+  )
+
+cat("Income divergence computed for", nrow(income_divergence), "urban units\n")
+```
+```{r}
+# ── Step 2: correlations ──────────────────────────────────────────────────────
+corr_data <- uu_stats %>%
+  select(UU2020, avg_divergence) %>%
+  left_join(income_divergence, by = "UU2020") %>%
+  left_join(bldg_age_uu,       by = "UU2020") %>%
+  filter(
+    !is.na(avg_divergence),
+    !is.na(income_div_idx),
+    !is.na(bldg_age_div_idx)
+  )
+
+cat("N for income correlation    :", 
+    sum(!is.na(corr_data$income_div_idx)), "\n")
+cat("N for building age correlation:",
+    sum(!is.na(corr_data$bldg_age_div_idx)), "\n\n")
+
+cor1 <- cor.test(corr_data$avg_divergence, corr_data$income_div_idx,
+                 method = "pearson")
+cor2 <- cor.test(corr_data$avg_divergence, corr_data$bldg_age_div_idx,
+                 method = "pearson")
+
+cat("Housing Tenure × Income divergence:\n")
+cat("  r =", round(cor1$estimate, 3),
+    " 95% CI: [", round(cor1$conf.int[1], 3), ",",
+                  round(cor1$conf.int[2], 3), "]",
+    " p =", format.pval(cor1$p.value, digits = 3), "\n\n")
+
+cat("Housing Tenure × Building age entropy:\n")
+cat("  r =", round(cor2$estimate, 3),
+    " 95% CI: [", round(cor2$conf.int[1], 3), ",",
+                  round(cor2$conf.int[2], 3), "]",
+    " p =", format.pval(cor2$p.value, digits = 3), "\n")
+```
+

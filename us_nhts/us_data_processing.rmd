@@ -1,0 +1,850 @@
+---
+title: "data_processing"
+author: "dawon"
+date: "2025-09-19"
+output: html_document
+---
+
+```{python}
+import pyodbc
+import pandas as pd
+import os
+from IPython.display import display 
+import numpy as np
+```
+
+```{python}
+# Define the folder path
+folder_path = r"C:\Users\ohdaw\OneDrive - Harvard University\tu_data\us_nhts"
+
+# Function to read CSV with encoding handling
+def read_csv_with_encoding(file_path):
+    try:
+        return pd.read_csv(file_path, encoding="utf-8")  # Try UTF-8 first
+    except UnicodeDecodeError:
+        return pd.read_csv(file_path, encoding="ISO-8859-1")  # Fallback to ISO-8859-1
+
+# Load CSV files with error handling
+hhpub = read_csv_with_encoding(os.path.join(folder_path, "hhpub.csv"))
+perpub = read_csv_with_encoding(os.path.join(folder_path, "perpub.csv"))
+trippub = read_csv_with_encoding(os.path.join(folder_path, "trippub.csv"))
+```
+
+# Create a TRIPID
+```{python}
+# Function to read CSV with encoding handling
+def read_csv_with_encoding(file_path):
+    try:
+        return pd.read_csv(file_path, encoding="utf-8")  # Try UTF-8 first
+    except UnicodeDecodeError:
+        return pd.read_csv(file_path, encoding="ISO-8859-1")  # Fallback to ISO-8859-1
+      
+# Define the folder path
+folder_path = r"C:\Users\ohdaw\OneDrive - Harvard University\tu_data\us_nhts"
+trippub = read_csv_with_encoding(os.path.join(folder_path, "trippub.csv"))
+
+
+# Clean & coerce key fields
+for col in ["HOUSEID", "PERSONID", "TDTRPNUM"]:
+    trippub[col] = pd.to_numeric(trippub[col], errors="coerce")
+
+# Optional: verify there are no duplicate trip keys
+dups = trippub.duplicated(["HOUSEID", "PERSONID", "TDTRPNUM"]).sum()
+if dups:
+    print(f"Warning: {dups} duplicate trip keys found.")
+
+# Create TRIPID as a readable, unique string
+trippub["TRIPID"] = (
+    trippub["HOUSEID"].astype("Int64").astype(str).str.strip() + "-" +
+    trippub["PERSONID"].astype("Int64").astype(str).str.zfill(3) + "-" +
+    trippub["TDTRPNUM"].astype("Int64").astype(str).str.zfill(2)
+)
+
+# If you prefer an integer hash (compact, joinable), also make this:
+trippub["TRIPHASH"] = (
+    trippub["HOUSEID"].astype("Int64").astype(str) + "_" +
+    trippub["PERSONID"].astype("Int64").astype(str) + "_" +
+    trippub["TDTRPNUM"].astype("Int64").astype(str)
+).apply(hash).astype("int64")
+
+
+key = ["HOUSEID","PERSONID","TDTRPNUM","TDAYDATE"]
+dups = trippub.duplicated(key).sum()
+trippub["TRIPID"] = (
+    trippub["HOUSEID"].astype("Int64").astype(str) + "-" +
+    trippub["PERSONID"].astype("Int64").astype(str).str.zfill(3) + "-" +
+    trippub["TDAYDATE"].astype(str) + "-" +
+    trippub["TDTRPNUM"].astype("Int64").astype(str).str.zfill(2)
+)
+
+
+output_file = os.path.join(folder_path, "trippub_id.csv")
+trippub.to_csv(output_file, index=False, encoding="utf-8-sig")
+```
+
+# Construct a Tour (closed)
+    """
+    Assign TOURID per (HOUSEID, PERSONID, TDAYDATE[, TRAVDAY]):
+    - Create TRIPID_n = 1,2,3,... as the within-group order of trips
+      (sorted by STRTTIME, then TRIPID for ties).
+    - If WHYFROM == 1 AND WHYTO == 1, set TOURID = TRIPID_n.
+    - Else, TOURID = <NA>.
+    """
+```{python}
+import os 
+import numpy as np
+import pandas as pd
+
+# ---------- Read ----------
+def read_csv_with_encoding(file_path):
+    try:
+        return pd.read_csv(file_path, encoding="utf-8")
+    except UnicodeDecodeError:
+        return pd.read_csv(file_path, encoding="ISO-8859-1")
+
+folder_path = r"C:\Users\ohdaw\OneDrive - Harvard University\tu_data\us_nhts"
+trippubid = read_csv_with_encoding(os.path.join(folder_path, "trippub_id.csv"))
+
+
+# ---------- Checks ----------
+required = ["HOUSEID","PERSONID","TRIPID","TDAYDATE","WHYFROM","WHYTO"]
+missing = [c for c in required if c not in trippubid.columns]
+if missing:
+    raise KeyError(f"Required column(s) missing: {missing}")
+
+# ---------- Normalize types (no function; top-level only) ----------
+df = trippubid.copy()
+
+df["HOUSEID"]  = pd.to_numeric(df["HOUSEID"],  errors="coerce").astype("Int64").astype(str).str.strip()
+df["PERSONID"] = pd.to_numeric(df["PERSONID"], errors="coerce").astype("Int64").astype(str).str.strip()
+df["TDAYDATE"] = pd.to_numeric(df["TDAYDATE"], errors="coerce").astype("Int64")
+
+if "TRAVDAY" not in df.columns:
+    df["TRAVDAY"] = pd.NA
+df["TRAVDAY"] = df["TRAVDAY"].astype("string")
+
+df["WHYFROM"] = pd.to_numeric(df["WHYFROM"], errors="coerce").astype("Int64")
+df["WHYTO"]   = pd.to_numeric(df["WHYTO"],   errors="coerce").astype("Int64")
+
+# IMPORTANT: TRIPID is a string key
+df["TRIPID"] = df["TRIPID"].astype("string")
+
+# --- assumes you already have df built and sorted, and group_cols set ---
+# sort (idempotent if you already sorted)
+sort_cols = ["HOUSEID","PERSONID","TDAYDATE","TRAVDAY"]
+if "STRTTIME" in df.columns:
+    sort_cols += ["STRTTIME"]
+elif "TDTRPNUM" in df.columns:
+    sort_cols += ["TDTRPNUM"]
+else:
+    sort_cols += ["TRIPID"]
+df = df.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
+
+group_cols = ["HOUSEID","PERSONID","TDAYDATE","TRAVDAY"]
+df["TRIPID_n"] = (df.groupby(group_cols, dropna=False).cumcount() + 1).astype("Int64")
+
+# Robust boolean flags (nullable Int64 -> treat NA as False)
+df["start_is_home"] = (df["WHYFROM"] == 1).fillna(False).astype(int)
+df["end_is_home"]   = (df["WHYTO"]   == 1).fillna(False).astype(int)
+
+group_cols = ["HOUSEID","PERSONID","TDAYDATE","TRAVDAY"]
+
+# Cumulative counts within each person-day
+df["starts_cum"] = df.groupby(group_cols, dropna=False)["start_is_home"].cumsum()
+ends_cum         = df.groupby(group_cols, dropna=False)["end_is_home"].cumsum()
+
+# Count of home-arrivals BEFORE the current row (avoid group-wise shift by subtracting current flag)
+df["ends_prev"]  = ends_cum - df["end_is_home"]
+
+# Inside a tour from a home-departure until (and including) the next home-arrival
+in_tour = (df["starts_cum"] - df["ends_prev"]) >= 1
+
+# TOUR_NUM = start count for rows inside a tour; NA otherwise
+df["TOUR_NUM"] = pd.Series(pd.NA, index=df.index, dtype="Float64")
+df.loc[in_tour, "TOUR_NUM"] = df.loc[in_tour, "starts_cum"].astype("Int64").astype(float)
+
+# Build TOURID
+df["TOURID"] = pd.NA
+has_tour = df["TOUR_NUM"].notna()
+tour_num_str = df.loc[has_tour, "TOUR_NUM"].astype(int).astype(str).str.zfill(2)
+df.loc[has_tour, "TOURID"] = (
+    df.loc[has_tour, "HOUSEID"].astype(str).str.strip() + "-"
+    + df.loc[has_tour, "PERSONID"].astype(str).str.strip() + "-"
+    + df.loc[has_tour, "TDAYDATE"].astype("Int64").astype(str) + "-"
+    + df.loc[has_tour, "TRAVDAY"].fillna("NA").astype(str) + "-N" + tour_num_str
+).astype("string")
+
+# Force trips where WHYFROM==1 and WHYTO==1 on the same row to NA
+mask_same_home = df["WHYFROM"].eq(1) & df["WHYTO"].eq(1)
+df.loc[mask_same_home, ["TOUR_NUM","TOURID"]] = pd.NA
+
+# Renumber tours consecutively within each person-day (skip NA rows)
+def _renumber_tours(g: pd.DataFrame) -> pd.Series:
+    vals = g["TOUR_NUM"]
+    # preserve order of first occurrence within the group
+    uniq_in_order = pd.unique(vals.dropna())
+    mapping = {v: i + 1 for i, v in enumerate(uniq_in_order)}
+    out = vals.map(mapping)
+    return out.astype("Float64")  # keep NA capability
+
+group_cols = ["HOUSEID","PERSONID","TDAYDATE","TRAVDAY"]
+df["TOUR_NUM"] = (
+    df.groupby(group_cols, dropna=False, group_keys=False)
+      .apply(_renumber_tours)
+)
+
+# Rebuild TOURID from the renumbered TOUR_NUM
+df["TOURID"] = pd.NA
+has_tour = df["TOUR_NUM"].notna()
+tour_num_str = df.loc[has_tour, "TOUR_NUM"].astype(int).astype(str).str.zfill(2)
+
+df.loc[has_tour, "TOURID"] = (
+    df.loc[has_tour, "HOUSEID"].astype(str).str.strip() + "-"
+    + df.loc[has_tour, "PERSONID"].astype(str).str.strip() + "-"
+    + df.loc[has_tour, "TDAYDATE"].astype("Int64").astype(str) + "-"
+    + df.loc[has_tour, "TRAVDAY"].fillna("NA").astype(str) + "-N" + tour_num_str
+).astype("string")
+
+# (optional) clean up helpers
+# df = df.drop(columns=["start_is_home","end_is_home","starts_cum","ends_prev"])
+print(df.loc[(df["HOUSEID"]=="30000012") & (df["PERSONID"]=="1") & (df["TRAVDAY"]=="5"),
+             ["TDTRPNUM","STRTTIME","ENDTIME","WHYFROM","WHYTO","TRIPID_n","TOUR_NUM","TOURID"]])
+
+# Save
+output_file = os.path.join(folder_path, "trippub_id_tour.csv")
+df.to_csv(output_file, index=False, encoding="utf-8-sig")
+```
+```{python}
+dT = df.copy()  # if you want the result in dT; or keep using df
+dT = dT[dT["TOURID"].notna()].copy()
+
+# Rebuild these two if you dropped them earlier
+dT["start_is_home"] = (dT["WHYFROM"] == 1).fillna(False).astype(int)
+dT["end_is_home"]   = (dT["WHYTO"]   == 1).fillna(False).astype(int)
+
+group_cols = ["HOUSEID","PERSONID","TDAYDATE","TRAVDAY"]
+
+# Cumulative home-starts / home-ends (again; safe to recompute)
+starts_cum = dT.groupby(group_cols, dropna=False)["start_is_home"].cumsum()
+ends_cum   = dT.groupby(group_cols, dropna=False)["end_is_home"].cumsum()
+
+# Your TOUR_NUM is the (renumbered) start count inside the person-day.
+# If you renamed, adapt here; we’ll use it directly:
+tour_num = dT["TOUR_NUM"]
+
+# Mark first/last trips *by event*, not by position after sorting
+dT["first_in_tour"] = (dT["start_is_home"].eq(1) & starts_cum.eq(tour_num)).astype(int)
+dT["last_in_tour"]  = (dT["end_is_home"].eq(1)   & ends_cum.eq(tour_num)).astype(int)
+
+# Sanity checks should now pass (or at least be far fewer)
+check_first = dT.loc[dT["first_in_tour"].eq(1), "WHYFROM"].eq(1).all()
+check_last  = dT.loc[dT["last_in_tour"].eq(1),  "WHYTO"].eq(1).all()
+print("First departs home:", check_first, "| Last arrives home:", check_last)
+
+print("Bad first tours:",
+      dT.loc[dT["first_in_tour"].eq(1) & ~dT["WHYFROM"].eq(1), "TOURID"].nunique())
+print("Bad last tours:",
+      dT.loc[dT["last_in_tour"].eq(1)  & ~dT["WHYTO"].eq(1),  "TOURID"].nunique())
+```
+ 
+```{python}
+# No single-row home→home should have a TOURID anymore
+check = df.loc[(df["WHYFROM"].eq(1) & df["WHYTO"].eq(1)) & df["TOURID"].notna(),
+               ["HOUSEID","PERSONID","TDAYDATE","TRAVDAY","TRIPID","TOUR_NUM","TOURID"]]
+print("Count of single-row home→home with TOURID (should be 0):", len(check))
+```
+
+# Clean up IDs
+```{python}
+# Ensure we're only keeping tours that exist, and drop TRIPHASH if present
+df_clean = df.dropna(subset=["TOURID"]).copy()
+
+# Drop TRIPHASH if it exists
+if "TRIPHASH" in df_clean.columns:
+    df_clean = df_clean.drop(columns=["TRIPHASH"])
+
+# Sort to get consistent order
+df_clean = df_clean.sort_values(
+    ["HOUSEID","PERSONID","TDAYDATE","TRAVDAY","TRIPID"], kind="mergesort"
+)
+
+# Sequential TRIPID with leading '1'
+trip_codes = pd.factorize(df_clean["TRIPID"], sort=False)[0] + 1
+df_clean["TRIPID"] = (
+    (trip_codes + 100000).astype(str)
+)
+
+# Sequential TOURID with leading '1'
+tour_codes = pd.factorize(df_clean["TOURID"], sort=False)[0] + 1
+df_clean["TOURID"] = (
+    (tour_codes + 100000).astype(str)
+)
+
+# Reset index
+df_clean = df_clean.reset_index(drop=True)
+
+# Save
+output_file_clean = os.path.join(folder_path, "trippub_id_tour_clean.csv")
+df_clean.to_csv(output_file_clean, index=False, encoding="utf-8-sig")
+
+# Peek
+print(df_clean[["HOUSEID","PERSONID","TDAYDATE","TRAVDAY","TRIPID","TOURID"]].head(10))
+```
+
+```{python}
+def read_csv_with_encoding(file_path):
+    try:
+        return pd.read_csv(file_path, encoding="utf-8")
+    except UnicodeDecodeError:
+        return pd.read_csv(file_path, encoding="ISO-8859-1")
+
+folder_path = r"C:\Users\ohdaw\OneDrive - Harvard University\tu_data\us_nhts"
+
+hhpub = read_csv_with_encoding(os.path.join(folder_path, "hhpub.csv"))
+perpub = read_csv_with_encoding(os.path.join(folder_path, "perpub.csv"))
+tourpub = read_csv_with_encoding(os.path.join(folder_path, "trippub_id_tour_clean.csv"))
+
+
+df_1 = perpub.merge(hhpub, on="HOUSEID", how="left")
+df_2 = tourpub.merge(df_1, on=["HOUSEID", "PERSONID"], how="left")
+
+# Remove columns ending with "_x" and rename "_y" columns
+df_2 = df_2[[col for col in df_2.columns if not col.endswith("_x")]]
+df_2.columns = [col[:-2] if col.endswith("_y") else col for col in df_2.columns]
+
+
+output_path = os.path.join(folder_path, "hh_per_tour.csv")
+df_2.to_csv(output_path, index=False, encoding="utf-8-sig") 
+```
+
+# Drop unrecorded values
+```{python}
+#Load dataset
+df_path = os.path.join(folder_path, "hh_per_tour.csv")
+df_2 = pd.read_csv(df_path, encoding="utf-8-sig")
+
+# drop duplicated columns
+df_2 = df_2.loc[:, ~df_2.columns.duplicated()]
+
+
+# TDTRPNUM (tour complexity) / CNTTDHH (Count of HH trips) / CNTTDTR	(Count of person trips) 
+# STRTTIME (Start Time) / ENDTIME	(End Time) / WHYTRP1S (Purpose)
+# R_SEX_IMP (gender) / R_AGE_IMP (age)
+# HHSIZE (Count of HH members) / YOUNGCHILD (Count of age 0-4 in HH) / NUMADLT (Count of adults in HH)
+
+# Work status
+df_2 = df_2[~df_2["WORKER"].isin([-1, -9])]
+
+# Single or 2+ adults
+df_2 = df_2[~df_2["LIF_CYC"].isin([-9])]
+
+# Household relationship
+df_2 = df_2[~df_2["R_RELAT"].isin([-7, -8, -9])]
+
+# Income
+df_2 = df_2[~df_2["HHFAMINC"].isin([-7, -8, -9])]
+
+# Mode
+df_2 = df_2[~df_2["TRPTRANS"].isin([-7, -8, -9])]
+
+# Trip purpose
+df_2 = df_2[~df_2["TRIPPURP"].isin([-9])]
+
+# Travel distance (keep only nonnegative)
+df_2 = df_2[df_2["TRPMILES"] >= 0]
+
+# Travel time (keep only nonnegative)
+df_2 = df_2[df_2["DWELTIME"] >= 0]
+
+# Trip Duration
+df_2 = df_2[df_2["TRVLCMIN"] >= 0]
+
+# Accompanied
+df_2 = df_2[~df_2["HH_ONTD"].isin([-9])] # Number of household members on trip - self reported
+df_2 = df_2[~df_2["TRPHHACC"].isin([-9])] # Count of Household Members on Trip - calculated/ constructed variable
+
+
+output_filtered_path = os.path.join(folder_path, "us_merged_filtered.csv")
+df_2.to_csv(output_filtered_path, index=False, encoding="utf-8-sig")
+```
+
+#bHow many unique trips and tours
+```{python}
+# Number of trips (TRIPID should be unique per trip)
+n_trips = df_2["TRIPID"].nunique()
+
+# Number of tours (only non-null TOURIDs)
+n_tours = df_2["TOURID"].nunique(dropna=True)
+
+print("Number of unique trips:", n_trips)
+print("Number of unique tours:", n_tours)
+
+n_trips_no_tour = df_2[df_2["TOURID"].isna()]["TRIPID"].nunique()
+print("Trips without a tour:", n_trips_no_tour)
+```
+
+#Check how many more than 1 home-based tour in a day
+```{python}
+# Group by household, person, and day, then count distinct tours
+tour_counts = (
+  df_2.dropna(subset=["TOURID"])   # ignore rows without a tour
+      .groupby(["HOUSEID","PERSONID","TDAYDATE","TRAVDAY"])["TOURID"]
+      .nunique()
+      .reset_index(name="num_tours")
+)
+
+# Flag person-days with >1 tour
+multi_tour_days = tour_counts.loc[tour_counts["num_tours"] > 1]
+
+# Count how many unique persons and households
+num_persons    = multi_tour_days[["HOUSEID","PERSONID"]].drop_duplicates().shape[0]
+num_households = multi_tour_days["HOUSEID"].nunique()
+
+print("Number of persons with >1 home-based tour in a day:", num_persons)
+print("Number of households with >1 home-based tour in a day:", num_households)
+
+# (Optional) peek at some results
+print(multi_tour_days.head())
+```
+```{r}
+reticulate::py_install("seaborn")
+```
+
+# Household with Children
+```{python}
+import os
+import numpy as np
+import pandas as pd
+
+folder_path = r"C:\Users\ohdaw\OneDrive - Harvard University\tu_data\us_nhts"
+df_path = os.path.join(folder_path, "us_merged_filtered.csv")
+df_2 = pd.read_csv(df_path, encoding="utf-8-sig")
+
+# Make sure YOUNGCHILD and LIF_CYC are numeric
+df_2["YOUNGCHILD"] = pd.to_numeric(df_2["YOUNGCHILD"], errors="coerce").fillna(0)
+df_2["LIF_CYC"] = pd.to_numeric(df_2["LIF_CYC"], errors="coerce")
+
+# households with children under 10 (from ages)
+households_with_u10 = (
+    df_2.loc[(df_2["R_AGE"] < 10) & (df_2["R_AGE"] > 0), "HOUSEID"]
+      .unique()
+)
+
+# households with YOUNGCHILD > 0
+households_with_youngchild = df_2.loc[df_2["YOUNGCHILD"] > 0, "HOUSEID"].unique()
+
+# households with LIF_CYC in {3,4,5,6}
+households_with_lifcyc = df_2.loc[df_2["LIF_CYC"].isin([3,4,5,6]), "HOUSEID"].unique()
+
+# households with HHSIZE-NUMADLT
+households_with_numadlt = df_2.loc[(df_2["HHSIZE"]-df_2["NUMADLT"] > 0), "HOUSEID"].unique()
+
+# union of all three sets
+kid_households = set(households_with_u10) | set(households_with_youngchild) | set(households_with_lifcyc) | set(households_with_numadlt)
+
+# subset the dataset
+df_kid_hh = df_2[df_2["HOUSEID"].isin(kid_households)]
+
+print("Unique households with children (any definition):", len(kid_households))
+print(df_kid_hh.head())
+
+output_filtered_path = os.path.join(folder_path, "us_HHwithU10.csv")
+df_kid_hh.to_csv(output_filtered_path, index=False, encoding="utf-8-sig")
+```
+
+# Respondant's age distribution
+```{python}
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Step 1: Group by RespAgeSimple and SessionId, count unique JourneyIds
+journey_counts = (
+  df_kid_hh.groupby(["R_AGE_IMP", "PERSONID"])["TOURID"]
+  .nunique()
+  .reset_index(name="NumJourneys")
+)
+
+# Step 2: Sum journeys per age group (across all sessions)
+age_journey_summary = journey_counts.groupby("R_AGE_IMP")["NumJourneys"].sum().reset_index()
+
+# Step 3: Ensure RespAgeSimple is a categorical variable with correct order
+sorted_ages = sorted(age_journey_summary["R_AGE_IMP"].dropna().unique())
+age_journey_summary["R_AGE_IMP"] = pd.Categorical(age_journey_summary["R_AGE_IMP"], 
+                                                      categories=sorted_ages,
+                                                      ordered=True)
+
+# Step 4: Define tick labels (every 2 years)
+custom_ticks = list(range(0,100,2))
+
+# Step 5: Plot
+plt.figure(figsize=(8, 4))
+sns.barplot(data=age_journey_summary, x="R_AGE_IMP", y="NumJourneys", color="#4C72B0")
+
+# Set custom ticks — match ticks to x-axis labels
+plt.xticks(
+    ticks=[i for i, age in enumerate(sorted_ages) if age in custom_ticks],
+    labels=[age for age in sorted_ages if age in custom_ticks],
+    rotation=0
+)
+
+# Labels and title
+plt.title("Number of Journeys by Respondent Age (0–100)", fontsize=14)
+plt.xlabel("Respondent Age", fontsize=12)
+plt.ylabel("Count", fontsize=12)
+
+# Adjust layout
+plt.tight_layout(pad=2)
+plt.subplots_adjust(left=0.12)
+plt.show()
+```
+# Check the distribution and decide the age cut
+```{python}
+# Count respondents per age
+age_counts = df_kid_hh["R_AGE_IMP"].value_counts().reset_index()
+age_counts.columns = ["R_AGE_IMP", "Count"]
+
+# Add percentage
+age_counts["Percentage"] = (age_counts["Count"] / age_counts["Count"].sum() * 100).round(2)
+
+# Sort by age if needed
+age_counts = age_counts.sort_values("R_AGE_IMP")
+
+# Use the summary you already created
+age_journey_summary["Percentage"] = (
+    age_journey_summary["NumJourneys"] / age_journey_summary["NumJourneys"].sum() * 100
+).round(2)
+
+
+print(age_counts.head(20))
+print(age_counts.tail(30))
+```
+# The number of younger (0-9) /older (10-17) sibling in HH
+```{python}
+df_path = os.path.join(folder_path, "us_HHwithU10.csv")
+df_2 = pd.read_csv(df_path, encoding="utf-8-sig")
+
+# ---- Safety: ensure required columns exist ----
+required_cols = {"HOUSEID", "R_AGE_IMP", "YOUNGCHILD"}  # YOUNGCHILD is required here
+missing = required_cols - set(df_2.columns)
+if missing:
+    raise ValueError(f"Missing required columns: {missing}")
+
+# Clean types
+df = df_2.copy()
+df["R_AGE_IMP"]  = pd.to_numeric(df["R_AGE_IMP"], errors="coerce")
+df["YOUNGCHILD"] = pd.to_numeric(df["YOUNGCHILD"], errors="coerce")
+df = df.dropna(subset=["HOUSEID"])  # keep households even if age missing on some rows
+
+# ---- Person-level flags (only ranges the roster actually contains) ----
+is_6_9   = df["R_AGE_IMP"].between(6, 9, inclusive="both").fillna(False)
+is_10_17 = df["R_AGE_IMP"].between(10, 17, inclusive="both").fillna(False)
+
+# ---- Count people by household ----
+by_hh = (
+    df.assign(is_6_9=is_6_9.astype(int), is_10_17=is_10_17.astype(int))
+      .groupby("HOUSEID", as_index=False)
+      .agg(num_6_9=("is_6_9", "sum"),
+           num_10_17=("is_10_17", "sum"))
+)
+
+# ---- Attach one YOUNGCHILD value per household (count of ages 0–5) ----
+yc = (df[["HOUSEID", "YOUNGCHILD"]]
+        .dropna(subset=["YOUNGCHILD"])
+        .drop_duplicates("HOUSEID"))
+# If a household has all YOUNGCHILD missing, treat as 0
+by_hh = by_hh.merge(yc, on="HOUSEID", how="left")
+by_hh["YOUNGCHILD"] = by_hh["YOUNGCHILD"].fillna(0).astype(int)
+
+# ---- Final household counts ----
+# Under 10 (0–9) = 0–5 (from YOUNGCHILD) + 6–9 (from roster)
+by_hh["numu10inhh"]   = by_hh["YOUNGCHILD"] + by_hh["num_6_9"]
+by_hh["num1017inhh"]  = by_hh["num_10_17"]
+
+# (Optional) keep a tidy subset
+hh = by_hh[["HOUSEID", "numu10inhh", "num1017inhh"]].copy()
+
+# ---- Distributions (share of households by count) ----
+def dist_table(series, total):
+    counts = series.value_counts().sort_index()
+    pct = (counts / total * 100).round(2)
+    out = pd.DataFrame({"count": counts, "percent_of_households": pct})
+    out.index.name = series.name
+    return out
+
+total_households = hh.shape[0]
+dist_numu10   = dist_table(hh["numu10inhh"],  total_households)
+dist_num1017  = dist_table(hh["num1017inhh"], total_households)
+
+print(f"Total households: {total_households:,}\n")
+print("Distribution of numu10inhh (0–5 via YOUNGCHILD + 6–9 via roster):")
+print(dist_numu10, "\n")
+print("Distribution of num1017inhh (10–17 via roster):")
+print(dist_num1017)
+```
+# Drop excessive 10-17 HH
+```{python}
+# Step 1: filter households in hh
+hh_keep = hh.loc[hh["num1017inhh"] <= 6, ["HOUSEID"]]
+
+# Step 2: keep only those households in the original df
+df_filtered = df[df["HOUSEID"].isin(hh_keep["HOUSEID"])].copy()
+
+print(f"Original rows: {df.shape[0]:,}")
+print(f"Filtered rows: {df_filtered.shape[0]:,}")
+print(f"Households dropped: {hh.shape[0] - hh_keep.shape[0]:,}")
+
+output_filtered_path = os.path.join(folder_path, "us_HHwithU10_1017.csv")
+df_filtered.to_csv(output_filtered_path, index=False, encoding="utf-8-sig")
+```
+
+# Costruct "PartyNumu10" and "PartyNum1017" ( resp >= 23)
+```{python}
+#Load dataset
+df_path = os.path.join(folder_path, "us_HHwithU10_1017.csv")
+df_2 = pd.read_csv(df_path, encoding="utf-8-sig")
+
+df_2.columns = df_2.columns.str.strip()
+df_1.columns = df_1.columns.str.strip()
+
+# 0) Keep respondents age 23–69
+df_2 = df_2[(pd.to_numeric(df_2["R_AGE_IMP"], errors="coerce") >= 23) &
+            (pd.to_numeric(df_2["R_AGE_IMP"], errors="coerce") <= 69)]
+
+# 1) Identify ONTD columns and coerce to nullable ints
+ontd_cols = [c for c in df_2.columns if c.upper().startswith("ONTD_P")]
+if not ontd_cols:
+    raise KeyError("No ONTD_P* columns found in df_2.")
+
+   # Coerce them to numeric (works for both 0/1 flags and ID values)
+for c in ontd_cols:
+    df_2[c] = pd.to_numeric(df_2[c], errors="coerce")
+    
+# 2) Person-level lookup: (HOUSEID, PERSONID) -> companion age
+age_lookup = (
+    df_1[["HOUSEID", "PERSONID", "R_AGE_IMP"]]
+      .drop_duplicates()
+      .rename(columns={"PERSONID": "COMP_ID", "R_AGE_IMP": "ACC_AGE"})
+)
+
+# 3) Melt trips to long; ensure the var name is ONTD_COL
+m = df_2[["TRIPID", "HOUSEID"] + ontd_cols].melt(
+    id_vars=["TRIPID", "HOUSEID"],
+    value_vars=ontd_cols,
+    var_name="ONTD_COL",
+    value_name="VAL"
+)
+
+# 4) Detect schema (flags vs IDs) and build `long`
+val_non_na = m["VAL"].dropna()
+is_flag_schema = val_non_na.isin([0, 1]).all()
+
+if is_flag_schema:
+    # Flag schema: keep rows where flag == 1
+    long = m.loc[m["VAL"] == 1].copy()
+    # Parse COMP_ID from ONTD_P* suffix (ONTD_P7 -> 7)
+    long["COMP_ID"] = long["ONTD_COL"].str.extract(r"ONTD_P(\d+)", expand=False).astype("Int64")
+else:
+    # ID schema: keep rows with non-null person IDs
+    long = m.dropna(subset=["VAL"]).copy()
+    long["COMP_ID"] = long["VAL"].astype("Int64")
+    
+   # Sanity checks so we don't get KeyError surprises again
+assert "ONTD_COL" in long.columns or not is_flag_schema, "Expected ONTD_COL in flag schema."
+assert "COMP_ID" in long.columns, "COMP_ID not created."
+
+# 5) Attach companion ages; ACC_AGE lives only in the long table
+long = (
+    long.merge(age_lookup, on=["HOUSEID", "COMP_ID"], how="left")
+        [["TRIPID", "HOUSEID", "COMP_ID", "ACC_AGE"]]
+        .drop_duplicates()
+)
+
+# 6) Per-trip counts from ACC_AGE (companions)
+long["ACC_AGE"] = pd.to_numeric(long["ACC_AGE"], errors="coerce")
+
+long["is_6_9"]   = long["ACC_AGE"].between(6, 9, inclusive="both")
+long["is_1017"]  = long["ACC_AGE"].between(10, 17, inclusive="both")
+
+counts_age = (
+    long.groupby("TRIPID", as_index=True)
+        .agg(num_6_9=("is_6_9", "sum"),
+             PartyNum1017=("is_1017", "sum"))
+        .astype("Int64")
+)
+
+# --- 6a) One YOUNGCHILD value per HOUSEID (0–5 count) ---
+
+# Prefer df_1 if it has YOUNGCHILD; else fall back to df_2
+if "YOUNGCHILD" in df_1.columns:
+    yc_src = df_1[["HOUSEID", "YOUNGCHILD"]].dropna(subset=["YOUNGCHILD"])
+elif "YOUNGCHILD" in df_2.columns:
+    yc_src = df_2[["HOUSEID", "YOUNGCHILD"]].dropna(subset=["YOUNGCHILD"])
+else:
+    raise KeyError("YOUNGCHILD not found in df_1 or df_2; needed for 0–5 counts.")
+
+yc = (
+    yc_src
+    .drop_duplicates("HOUSEID")
+    .assign(YOUNGCHILD=pd.to_numeric(yc_src["YOUNGCHILD"], errors="coerce"))
+    .fillna({"YOUNGCHILD": 0})
+)
+
+# Map HOUSEID → YOUNGCHILD onto trips (via df_2 which has TRIPID, HOUSEID)
+trips_yc = (
+    df_2[["TRIPID", "HOUSEID"]]
+      .drop_duplicates()
+      .merge(yc, on="HOUSEID", how="left")
+      .fillna({"YOUNGCHILD": 0})
+)
+trips_yc["YOUNGCHILD"] = trips_yc["YOUNGCHILD"].astype("Int64")
+
+# --- 6b) Combine to get PartyNumu10 per trip ---
+counts = (
+    counts_age
+    .merge(trips_yc[["TRIPID", "YOUNGCHILD"]].set_index("TRIPID"),
+           left_index=True, right_index=True, how="left")
+    .fillna({"YOUNGCHILD": 0})
+)
+counts["YOUNGCHILD"] = counts["YOUNGCHILD"].astype("Int64")
+counts["PartyNumu10"] = (counts["num_6_9"] + counts["YOUNGCHILD"]).astype("Int64")
+
+counts = counts[["PartyNumu10", "PartyNum1017"]]
+
+# 6c) Build per-trip ACC_AGE columns for df_2 (version-safe)
+# (A) list of all companion ages per TRIPID
+acc_all = (
+    long.dropna(subset=["ACC_AGE"])
+        .astype({"ACC_AGE": "Int64"})
+        .groupby("TRIPID", as_index=True)["ACC_AGE"]
+        .apply(lambda s: sorted(s.tolist()))
+        .rename("ACC_AGE_all")
+)
+
+# (B) list of minor companion ages (<=17) per TRIPID  [NO 'na=' here]
+acc_minors = (
+    long.loc[ long["ACC_AGE"].le(17).fillna(False) ]
+        .astype({"ACC_AGE": "Int64"})
+        .groupby("TRIPID", as_index=True)["ACC_AGE"]
+        .apply(lambda s: sorted(s.tolist()))
+        .rename("ACC_AGE_minors")
+)
+
+# Merge these into df_2 (respondent table). If the series are empty, merge still creates the columns.
+df_2 = (
+    df_2
+    .merge(acc_all.to_frame(), on="TRIPID", how="left")
+    .merge(acc_minors.to_frame(), on="TRIPID", how="left")
+    .merge(counts, on="TRIPID", how="left")
+)
+
+# Replace NaNs with empty lists so the columns are always list-typed
+df_2["ACC_AGE_all"]    = df_2["ACC_AGE_all"].apply(lambda x: x if isinstance(x, list) else [])
+df_2["ACC_AGE_minors"] = df_2["ACC_AGE_minors"].apply(lambda x: x if isinstance(x, list) else [])
+df_2[["PartyNumu10", "PartyNum1017"]] = (
+    df_2[["PartyNumu10", "PartyNum1017"]].fillna(0).astype("Int64")
+)
+
+# If you want a single minors-only column alias:
+df_2["ACC_AGE"] = df_2["ACC_AGE_minors"]
+
+print(df_2["ACC_AGE_all"].map(len).describe(), "  # counts of companions per trip")
+print(df_2["ACC_AGE_minors"].map(len).describe(), "# counts of minor companions per trip")
+                        
+
+acc_path = os.path.join(folder_path, "us_merged_filtered_acc.csv")
+df_2.to_csv(acc_path, index=False, encoding="utf-8-sig")
+long.to_csv(os.path.join(folder_path, "companions_long_with_ACC_AGE.csv"), index=False, encoding="utf-8-sig")
+```
+
+```{python}
+# Basic descriptive stats
+df_2[["PartyNumu10", "PartyNum1017"]].describe()
+
+# Distribution of values
+df_2["PartyNumu10"].value_counts().sort_index()
+df_2["PartyNum1017"].value_counts().sort_index()
+
+# Crosstab of both variables together (optional)
+pd.crosstab(df_2["PartyNumu10"], df_2["PartyNum1017"])
+```
+
+```{python}
+import os
+import numpy as np
+import pandas as pd
+
+folder_path = r"C:\Users\ohdaw\OneDrive - Harvard University\tu_data\us_nhts"
+dT_path = os.path.join(folder_path, "us_merged_filtered_acc.csv")
+dT = pd.read_csv(dT_path, encoding="utf-8-sig")
+
+dT.columns = dT.columns.str.strip()
+
+def classify_journey(df):
+    df = df.copy()
+    required = ["TOURID", "PartyNumu10", "PartyNum1017", "R_AGE_IMP"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise KeyError(f"Missing columns: {missing}")
+    df[["PartyNumu10","PartyNum1017"]] = df[["PartyNumu10","PartyNum1017"]].fillna(0)
+    df["TripHasChild"] = (df["PartyNumu10"] > 0)
+    by_tour = (
+        df.groupby("TOURID", dropna=False)["TripHasChild"]
+          .agg(all_has_child="all", any_has_child="any")
+          .reset_index()
+    )
+    by_tour["JourneyWithChildren"] = np.select(
+        [by_tour["all_has_child"], by_tour["any_has_child"]],
+        [1, 2],
+        default=3
+    )
+    df = df.drop(columns=["JourneyWithChildren"], errors="ignore")
+    df = df.merge(by_tour[["TOURID", "JourneyWithChildren"]], on="TOURID", how="left")
+    u10   = df["PartyNumu10"] > 0
+    a1017 = df["PartyNum1017"] > 0
+    df["ChildPresence"] = np.select(
+        [u10 & a1017, u10, a1017],
+        ["Both 0–9 and 10–17", "0–9 only", "10–17 only"],
+        default="No children"
+    )
+    df["ChildPresence_017"]  = (df["ChildPresence"] == "Both 0–9 and 10–17").astype(int)
+    df["ChildPresence_09"]   = (df["ChildPresence"] == "0–9 only").astype(int)
+    df["ChildPresence_1017"] = (df["ChildPresence"] == "10–17 only").astype(int)
+    df = df[df["R_AGE_IMP"] <= 85]
+    return df
+
+dT = classify_journey(dT)
+
+output_path = os.path.join(folder_path, "us_jwc_classified.csv")
+dT.to_csv(output_path, index=False, encoding="utf-8-sig")
+
+print(dT.head())
+```
+```{python}
+has_u10 = (dT["PartyNumu10"].fillna(0) > 0)
+has_any = (dT["PartyNumu10"].fillna(0) + dT["PartyNum1017"].fillna(0) > 0)
+
+# Tours labeled 3 (no u10s) should have no trip with u10s
+chk2_u10 = (
+    dT.groupby("TOURID")
+      .apply(lambda g: (g["JourneyWithChildren"].iloc[0] == 3) and has_u10.loc[g.index].any())
+)
+assert not chk2_u10.any(), "Found a tour labeled 3 that has a trip with UNDER-10s."
+
+# (Optional diagnostics) Which tours fail your original ANY-minors check?
+offending_any = (
+    dT.groupby("TOURID")
+      .apply(lambda g: (g["JourneyWithChildren"].iloc[0] == 3) and has_any.loc[g.index].any())
+)
+bad_tours = offending_any[offending_any].index.tolist()
+print("Tours with 10–17s but labeled 3 (no under-10s):", bad_tours[:10])
+
+# Peek at a few offending rows
+if bad_tours:
+    print(
+        dT.loc[dT["TOURID"].isin(bad_tours),
+               ["TOURID","PartyNumu10","PartyNum1017","JourneyWithChildren"]]
+          .head(20)
+    )
+```
+
+

@@ -1,0 +1,568 @@
+---
+title: "Park accessibility in Seoul: CCREM with corrected age coding"
+author: "Dawon Oh"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    df_print: paged
+params:
+  # "wide": build the long data from the wide origin-park file (full pipeline)
+  # "long": read data_long_for_R.csv that the Python notebook already saved
+  data_source: "wide"
+  wide_file: "C:/Users/ohdaw/OneDrive - Harvard University/snu_remains/redo/FINAL_dataset_2019only.csv"
+  long_file: "C:/Users/ohdaw/OneDrive - Harvard University/snu_remains/redo/ccrem_rerun/data_long_for_R.csv"
+  out_dir:   "C:/Users/ohdaw/OneDrive - Harvard University/snu_remains/redo/ccrem_rerun/R_output"
+  theta: 0.10
+  run_optimizer_check: true
+  run_lrt: true
+  run_fe_model: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 10, fig.height = 6)
+```
+
+# Overview
+
+This document runs the cross-classified random-effects model (CCREM) for the
+Seoul park accessibility paper and makes all figures in R.
+
+It includes two corrections to the earlier Python code.
+
+1. **Age coding.** The 70+ group (`M_7000`, `W_7000`) is coded as age 75.
+   The earlier code read `7000` as (70 + 0) / 2 = 35. In the figures, 65--69
+   now belongs to the 60--69 group.
+2. **Model terms.** Female × Age and Female × Age² are included as main
+   terms. A likelihood-ratio test compares the model with and without them.
+
+Set the paths in the `params` block at the top of this file. With
+`data_source: "wide"`, the file in `wide_file` must already contain the park
+variables (the merged file with 6,850 origin--park rows). With
+`data_source: "long"`, the document reads `data_long_for_R.csv` from the
+Python notebook.
+
+Packages needed: `lme4`, `lmerTest`, `ggplot2`. All other steps use base R.
+
+# 0. Setup
+
+```{r packages}
+library(lme4)
+library(lmerTest)
+library(ggplot2)
+
+# lme4 versions built for R >= 4.4 use the %||% helper, which is missing in
+# R 4.3. Define it here so that VarCorr() and rePCA() print correctly.
+if (!exists("%||%", mode = "function")) {
+  `%||%` <- function(x, y) if (is.null(x)) y else x
+}
+
+out_dir <- params$out_dir
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+THETA <- params$theta
+AMENITIES <- c("green_ratio", "user_ratio", "facility_number",
+               "parking_number", "transit_number", "park_area_ha")
+```
+
+# 1. Age lookup tables
+
+```{r age-tables}
+# Age midpoint used in the regression, by the 4-digit code in the column name
+AGE_MID <- c("0009" = 4.5,
+             "1014" = 12, "1519" = 17,
+             "2024" = 22, "2529" = 27,
+             "3034" = 32, "3539" = 37,
+             "4044" = 42, "4549" = 47,
+             "5054" = 52, "5559" = 57,
+             "6064" = 62, "6569" = 67,
+             "7000" = 75)            # open band 70+
+
+# Ten-year group used in the figures
+AGE_LABEL <- c("0009" = "0-9",
+               "1014" = "10-19", "1519" = "10-19",
+               "2024" = "20-29", "2529" = "20-29",
+               "3034" = "30-39", "3539" = "30-39",
+               "4044" = "40-49", "4549" = "40-49",
+               "5054" = "50-59", "5559" = "50-59",
+               "6064" = "60-69", "6569" = "60-69",
+               "7000" = "70+")
+LABEL_ORDER <- c("0-9", "10-19", "20-29", "30-39",
+                 "40-49", "50-59", "60-69", "70+")
+
+# Ages at which marginal effects are reported
+ME_AGES <- c("0-9" = 5, "10-19" = 15, "20-29" = 25, "30-39" = 35,
+             "40-49" = 45, "50-59" = 55, "60-69" = 65, "70+" = 75)
+```
+
+# 2. Build the long data
+
+```{r build-data}
+if (params$data_source == "wide") {
+
+  wide <- read.csv(params$wide_file, check.names = FALSE, fileEncoding = "UTF-8")
+  group_cols <- grep("^[MW]_[0-9]{4}$", names(wide), value = TRUE)
+  stopifnot(length(group_cols) == 28)
+
+  # Park variables (same definitions as the paper, Table 1)
+  wide$green_ratio <- wide$greenarea_area / wide$park_area * 100
+  wide$user_ratio  <- (wide$openspaace_area + wide$road_area +
+                       wide$walkingtrail_area + wide$shadecanopy_area) /
+                      wide$park_area * 100
+  wide$facility_number <- wide$gymtrack_number + wide$swimmingpool_number +
+                          wide$sportsfacility_number + wide$playground_number +
+                          wide$cafeteria_number + wide$kiosk_number
+  wide$parking_number <- wide$parkingcapacity_number
+  wide$transit_number <- wide$bus500 + wide$sub500
+  wide$park_area_ha   <- wide$park_area / 10000
+
+  cat("Parks:", length(unique(wide$ID)),
+      "| Origin gu:", length(unique(wide$INFLOW_CD)),
+      "| Origin-park pairs:", nrow(wide), "\n")
+
+  # Wide -> long: one row per origin-park pair and sex-age group
+  keep <- c("INFLOW_CD", "ID", "c_eq_min", AMENITIES)
+  dl <- do.call(rbind, lapply(group_cols, function(g) {
+    data.frame(wide[, keep], group = g, visitors = wide[[g]])
+  }))
+  cat("Rows before removing zero cells:", nrow(dl), "\n")
+  dl <- dl[dl$visitors > 0, ]
+  cat("Rows after removing zero cells: ", nrow(dl), "\n")
+
+  # Sex and age from the column name, using the lookup tables
+  code <- sub("^[MW]_", "", dl$group)
+  stopifnot(all(code %in% names(AGE_MID)))
+  dl$female    <- as.integer(substr(dl$group, 1, 1) == "W")
+  dl$age       <- unname(AGE_MID[code])
+  dl$age_label <- unname(AGE_LABEL[code])
+
+  # Check: 70+ must be 75
+  check <- unique(dl[, c("group", "female", "age", "age_label")])
+  print(check[order(check$female, check$age), ], row.names = FALSE)
+  stopifnot(all(check$age[grepl("7000$", check$group)] == 75))
+
+  AGE_MEAN <- mean(dl$age)
+  dl$age_c    <- dl$age - AGE_MEAN
+  dl$age_c_sq <- dl$age_c^2
+  dl$w        <- dl$visitors / mean(dl$visitors)   # weights rescaled to mean 1
+
+} else {
+
+  dl <- read.csv(params$long_file)
+  # age_c was centered in Python; recover the raw age from the smallest value,
+  # which belongs to the 0-9 band (midpoint 4.5)
+  AGE_MEAN <- 4.5 - min(dl$age_c)
+  dl$age <- round(dl$age_c + AGE_MEAN, 2)
+  stopifnot(all(dl$age %in% AGE_MID))
+  dl$age_label <- unname(AGE_LABEL[match(dl$age, AGE_MID)])
+  dl$age_c_sq <- dl$age_c^2
+}
+
+cat("Sample mean age used for centering:", round(AGE_MEAN, 3), "\n")
+cat("Observations:", nrow(dl), "\n")
+```
+
+# 3. Interaction terms
+
+```{r interactions}
+dl$female_age  <- dl$female * dl$age_c
+dl$female_age2 <- dl$female * dl$age_c_sq
+for (a in AMENITIES) {
+  dl[[paste0(a, "_F")]]   <- dl[[a]] * dl$female
+  dl[[paste0(a, "_A")]]   <- dl[[a]] * dl$age_c
+  dl[[paste0(a, "_A2")]]  <- dl[[a]] * dl$age_c_sq
+  dl[[paste0(a, "_FA")]]  <- dl[[a]] * dl$female * dl$age_c
+  dl[[paste0(a, "_FA2")]] <- dl[[a]] * dl$female * dl$age_c_sq
+}
+
+DEMO_TERMS <- c("female", "age_c", "age_c_sq", "female_age", "female_age2")
+AMEN_TERMS <- c(AMENITIES,
+                paste0(AMENITIES, "_F"),  paste0(AMENITIES, "_A"),
+                paste0(AMENITIES, "_A2"), paste0(AMENITIES, "_FA"),
+                paste0(AMENITIES, "_FA2"))
+FIXED_TERMS <- c(DEMO_TERMS, AMEN_TERMS)
+
+dl$ID        <- factor(dl$ID)
+dl$INFLOW_CD <- factor(dl$INFLOW_CD)
+
+f_full <- as.formula(paste("c_eq_min ~", paste(FIXED_TERMS, collapse = " + "),
+                           "+ (1|ID) + (1|INFLOW_CD)"))
+f_noFA <- as.formula(paste("c_eq_min ~",
+                           paste(setdiff(FIXED_TERMS, c("female_age", "female_age2")),
+                                 collapse = " + "),
+                           "+ (1|ID) + (1|INFLOW_CD)"))
+cat("Fixed-effect terms:", length(FIXED_TERMS), "\n")
+```
+
+# 4. Variance inflation factors
+
+```{r vif}
+# VIF_j = 1 / (1 - R2_j), where R2_j comes from regressing term j on the others
+vif_manual <- function(X) {
+  X <- as.data.frame(X)
+  sapply(names(X), function(v) {
+    r2 <- summary(lm(X[[v]] ~ ., data = X[setdiff(names(X), v)]))$r.squared
+    1 / (1 - r2)
+  })
+}
+
+vif_main <- vif_manual(dl[, c("female", "age_c", "age_c_sq", AMENITIES)])
+vif_full <- vif_manual(dl[, FIXED_TERMS])
+
+vif_tab <- data.frame(term = names(vif_full), VIF_full = round(vif_full, 2))
+vif_tab$VIF_main_design <- round(vif_main[vif_tab$term], 2)
+vif_tab <- vif_tab[order(-vif_tab$VIF_full), ]
+write.csv(vif_tab, file.path(out_dir, "vif.csv"), row.names = FALSE)
+
+cat("Amenity VIFs, main-effects design:\n"); print(round(vif_main[AMENITIES], 2))
+cat("\nTen highest VIFs, full design:\n");   print(head(vif_tab[, 1:2], 10), row.names = FALSE)
+```
+
+# 5. Fit the CCREM
+
+This chunk can take several minutes.
+
+```{r fit-ccrem}
+ctrl <- lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+fit <- lmer(f_full, data = dl, weights = w, REML = TRUE, control = ctrl)
+
+cat("isSingular:", isSingular(fit), "\n\n")
+print(VarCorr(fit))
+cat("\n")
+print(summary(rePCA(fit)))
+```
+
+## Optimizer check
+
+```{r optimizer-check, eval = params$run_optimizer_check}
+fit_nm <- update(fit, control = lmerControl(optimizer = "Nelder_Mead",
+                                            optCtrl = list(maxfun = 2e5)))
+cat("Max abs difference in fixed effects (BOBYQA vs Nelder-Mead):",
+    signif(max(abs(fixef(fit) - fixef(fit_nm))), 3), "\n")
+cat("logLik BOBYQA:", as.numeric(logLik(fit)),
+    "| logLik Nelder-Mead:", as.numeric(logLik(fit_nm)), "\n")
+```
+
+## Likelihood-ratio test for Female × Age and Female × Age²
+
+```{r lrt, eval = params$run_lrt}
+fit_noFA <- lmer(f_noFA, data = dl, weights = w, REML = TRUE, control = ctrl)
+lrt <- anova(fit_noFA, fit)        # anova() refits both models with ML
+print(lrt)
+write.csv(as.data.frame(lrt), file.path(out_dir, "lrt_female_age.csv"))
+```
+
+# 6. Results tables
+
+```{r results-tables}
+coefs <- as.data.frame(summary(fit)$coefficients)
+names(coefs) <- c("Estimate", "SE", "df", "t", "p")
+coefs$term <- rownames(coefs)
+stars <- function(p) ifelse(p < 0.001, "***", ifelse(p < 0.01, "**",
+                     ifelse(p < 0.05, "*", "")))
+coefs$Sig <- stars(coefs$p)
+write.csv(coefs, file.path(out_dir, "ccrem_coefficients.csv"), row.names = FALSE)
+
+V <- as.matrix(vcov(fit))
+write.csv(V, file.path(out_dir, "ccrem_vcov.csv"))
+
+print(coefs[, c("Estimate", "SE", "t", "p", "Sig")], digits = 4)
+```
+
+## Variance components and model fit
+
+```{r fit-stats}
+vc <- as.data.frame(VarCorr(fit))
+var_id  <- vc$vcov[vc$grp == "ID"]
+var_org <- vc$vcov[vc$grp == "INFLOW_CD"]
+var_res <- sigma(fit)^2
+var_f   <- var(as.vector(model.matrix(fit) %*% fixef(fit)))
+tot     <- var_f + var_id + var_org + var_res
+
+fitstats <- data.frame(
+  quantity = c("Park (ID) intercept variance", "Park (ID) intercept SD",
+               "Origin gu (INFLOW_CD) intercept variance", "Origin gu (INFLOW_CD) intercept SD",
+               "Residual variance", "Residual SD",
+               "ICC park", "ICC origin",
+               "Marginal R2", "Conditional R2",
+               "AIC", "BIC", "logLik", "N obs", "N parks", "N origin gu"),
+  value = c(var_id, sqrt(var_id), var_org, sqrt(var_org), var_res, sqrt(var_res),
+            var_id / (var_id + var_org + var_res), var_org / (var_id + var_org + var_res),
+            var_f / tot, (var_f + var_id + var_org) / tot,
+            AIC(fit), BIC(fit), as.numeric(logLik(fit)),
+            nobs(fit), nlevels(dl$ID), nlevels(dl$INFLOW_CD)))
+write.csv(fitstats, file.path(out_dir, "ccrem_fit_stats.csv"), row.names = FALSE)
+print(fitstats, digits = 6, row.names = FALSE)
+```
+
+## Main effects per unit and per standard deviation
+
+```{r std-effects}
+sds <- sapply(dl[, AMENITIES], sd)
+std_tab <- data.frame(
+  variable    = AMENITIES,
+  SD          = round(sds, 2),
+  coef_unit   = round(coefs[AMENITIES, "Estimate"], 4),
+  effect_SD   = round(coefs[AMENITIES, "Estimate"] * sds, 2),
+  p           = round(coefs[AMENITIES, "p"], 3))
+std_tab <- std_tab[order(std_tab$effect_SD), ]
+write.csv(std_tab, file.path(out_dir, "std_effects.csv"), row.names = FALSE)
+print(std_tab, row.names = FALSE)
+```
+
+## LaTeX rows for Table 3
+
+```{r latex-rows}
+tex_num <- function(x, dec = 4) {
+  if (x != 0 && abs(x) < 10^(-dec)) {
+    e <- floor(log10(abs(x))); m <- x / 10^e
+    return(sprintf("$%.2f\\times10^{%d}$", m, e))
+  }
+  s <- formatC(x, format = "f", digits = dec)
+  gsub("-", "$-$", s, fixed = TRUE)
+}
+tex_p   <- function(p) if (p < 0.001) "$<$0.001" else sprintf("%.3f", p)
+tex_lab <- function(t) {
+  labs <- c("(Intercept)" = "Constant", female = "Female",
+            age_c = "Age (centered)", age_c_sq = "Age$^2$ (centered)",
+            female_age = "Female $\\times$ Age", female_age2 = "Female $\\times$ Age$^2$")
+  if (t %in% names(labs)) labs[[t]] else gsub("_", "\\\\_", t)
+}
+sections <- list(
+  "Baseline" = c("(Intercept)", DEMO_TERMS),
+  "Park amenity main effects" = AMENITIES,
+  "Female interactions (\\_F)" = paste0(AMENITIES, "_F"),
+  "Age interactions (\\_A)" = paste0(AMENITIES, "_A"),
+  "Age$^2$ interactions (\\_A2)" = paste0(AMENITIES, "_A2"),
+  "Female $\\times$ Age interactions (\\_FA)" = paste0(AMENITIES, "_FA"),
+  "Female $\\times$ Age$^2$ interactions (\\_FA2)" = paste0(AMENITIES, "_FA2"))
+rows <- c()
+for (s in names(sections)) {
+  rows <- c(rows, sprintf("\\multicolumn{6}{l}{\\textit{%s}} \\\\[1pt]", s))
+  for (t in sections[[s]]) {
+    r <- coefs[t, ]
+    rows <- c(rows, sprintf("%s & %s & %s & %s & %s & %s \\\\", tex_lab(t),
+                            tex_num(r$Estimate), tex_num(r$SE), tex_num(r$t, 3),
+                            tex_p(r$p), r$Sig))
+  }
+  rows <- c(rows, "\\midrule")
+}
+writeLines(head(rows, -1), file.path(out_dir, "ccrem_table_rows.tex"))
+cat("Saved ccrem_table_rows.tex\n")
+```
+
+# 7. Marginal effects with delta-method confidence intervals
+
+For men at age $a$, with $\tilde a = a - \bar a$:
+$ME_M = \beta_Z + \delta_Z \tilde a + \phi_Z \tilde a^2$.
+For women, the terms $\gamma_Z + \eta_Z \tilde a + \psi_Z \tilde a^2$ are
+added. The Female × Age main terms do not enter, because they do not multiply
+the amenity.
+
+```{r marginal-effects}
+b <- fixef(fit)
+
+lin_comb <- function(w) {          # w: named vector of weights on coefficients
+  n <- names(w)
+  est <- sum(w * b[n])
+  se  <- sqrt(as.numeric(t(w) %*% V[n, n] %*% w))
+  c(est = est, se = se)
+}
+
+me_rows <- list()
+for (a in AMENITIES) {
+  for (lab in names(ME_AGES)) {
+    ac <- ME_AGES[[lab]] - AGE_MEAN
+    wm <- setNames(c(1, ac, ac^2), paste0(a, c("", "_A", "_A2")))
+    wf <- setNames(c(1, ac, ac^2), paste0(a, c("_F", "_FA", "_FA2")))
+    m  <- lin_comb(wm)
+    wo <- lin_comb(c(wm, wf))
+    d  <- lin_comb(wf)
+    me_rows[[length(me_rows) + 1]] <- data.frame(
+      Amenity = a, AgeGroup = lab, Age = ME_AGES[[lab]],
+      Men = m[["est"]], Men_se = m[["se"]],
+      Women = wo[["est"]], Women_se = wo[["se"]],
+      Diff = d[["est"]], Diff_se = d[["se"]],
+      Diff_p = 2 * (1 - pnorm(abs(d[["est"]] / d[["se"]]))))
+  }
+}
+me <- do.call(rbind, me_rows)
+me$AgeGroup <- factor(me$AgeGroup, levels = LABEL_ORDER)
+me$Amenity  <- factor(me$Amenity,  levels = AMENITIES)
+write.csv(me, file.path(out_dir, "marginal_effects_ccrem.csv"), row.names = FALSE)
+print(transform(me[, c("Amenity", "AgeGroup", "Men", "Women", "Diff", "Diff_p")],
+                Men = round(Men, 4), Women = round(Women, 4),
+                Diff = round(Diff, 4), Diff_p = round(Diff_p, 3)),
+      row.names = FALSE)
+```
+
+```{r me-latex}
+me_tex <- c()
+for (a in AMENITIES) {
+  me_tex <- c(me_tex, sprintf("\\multicolumn{4}{l}{\\texttt{%s}} \\\\", gsub("_", "\\\\_", a)))
+  s <- me[me$Amenity == a, ]
+  for (i in seq_len(nrow(s))) {
+    me_tex <- c(me_tex, sprintf("\\quad %s & %s & %s & %s%s \\\\",
+                                gsub("-", "--", as.character(s$AgeGroup[i])),
+                                tex_num(s$Men[i], 3), tex_num(s$Women[i], 3),
+                                tex_num(s$Diff[i], 4), stars(s$Diff_p[i])))
+  }
+}
+writeLines(me_tex, file.path(out_dir, "marginal_effects_table.tex"))
+cat("Saved marginal_effects_table.tex\n")
+```
+
+# 8. Figures
+
+```{r fig-theme}
+sex_cols <- c("Men" = "#1f77b4", "Women" = "#ff7f0e")
+theme_paper <- theme_bw(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom", legend.title = element_blank(),
+        strip.background = element_rect(fill = "grey95"))
+fmt3 <- function(x) formatC(x, format = "f", digits = 3)
+```
+
+## Marginal effects by age group and sex
+
+```{r fig-me, fig.width = 12, fig.height = 7}
+me_long <- rbind(
+  data.frame(me[, c("Amenity", "AgeGroup")], Sex = "Men",   ME = me$Men),
+  data.frame(me[, c("Amenity", "AgeGroup")], Sex = "Women", ME = me$Women))
+
+p_me <- ggplot(me_long, aes(AgeGroup, ME, colour = Sex, group = Sex)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_line() + geom_point(size = 2) +
+  facet_wrap(~ Amenity, scales = "free_y", ncol = 3) +
+  scale_colour_manual(values = sex_cols) +
+  scale_y_continuous(labels = fmt3) +
+  labs(x = "Age group", y = "Effect on travel cost (minutes)") +
+  theme_paper
+p_me
+ggsave(file.path(out_dir, "marginal_effects_ccrem.png"), p_me,
+       width = 12, height = 7, dpi = 300)
+```
+
+## Gender difference in marginal effects (Women − Men, 95% CI)
+
+```{r fig-me-gap, fig.width = 12, fig.height = 7}
+me$lo <- me$Diff - 1.96 * me$Diff_se
+me$hi <- me$Diff + 1.96 * me$Diff_se
+
+p_gap <- ggplot(me, aes(AgeGroup, Diff, group = 1)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_ribbon(aes(ymin = lo, ymax = hi), fill = "darkgreen", alpha = 0.15) +
+  geom_line(colour = "darkgreen") + geom_point(colour = "darkgreen", size = 2) +
+  facet_wrap(~ Amenity, scales = "free_y", ncol = 3) +
+  scale_y_continuous(labels = fmt3) +
+  labs(x = "Age group", y = "Women \u2212 Men (minutes)") +
+  theme_paper
+p_gap
+ggsave(file.path(out_dir, "marginal_effects_gap_ccrem.png"), p_gap,
+       width = 12, height = 7, dpi = 300)
+```
+
+## Potential and realized accessibility by age group and sex
+
+All values use the same 274-park sample as the regression. Ten-year values
+are visitor-weighted over all rows in the group.
+
+```{r descriptive}
+logsumexp <- function(x) { m <- max(x); m + log(sum(exp(x - m))) }
+
+# Potential accessibility: logsum over parks for each origin gu
+pairs <- dl[!duplicated(dl[, c("ID", "INFLOW_CD")]), c("ID", "INFLOW_CD", "c_eq_min")]
+for (th in c(0.05, 0.10, 0.20)) {
+  A_th <- tapply(pairs$c_eq_min, pairs$INFLOW_CD, function(x) logsumexp(-th * x))
+  cat(sprintf("theta = %.2f: logsum range %.3f to %.3f\n", th, min(A_th), max(A_th)))
+}
+A_origin <- tapply(pairs$c_eq_min, pairs$INFLOW_CD, function(x) logsumexp(-THETA * x))
+dl$A_o <- A_origin[as.character(dl$INFLOW_CD)]
+
+dl$Sex <- ifelse(dl$female == 1, "Women", "Men")
+grp <- do.call(rbind, lapply(split(dl, list(dl$Sex, dl$age_label), drop = TRUE), function(x)
+  data.frame(Sex = x$Sex[1], AgeGroup = x$age_label[1],
+             A_weighted = weighted.mean(x$A_o, x$w),
+             c_weighted = weighted.mean(x$c_eq_min, x$w))))
+grp$AgeGroup <- factor(grp$AgeGroup, levels = LABEL_ORDER)
+grp <- grp[order(grp$Sex, grp$AgeGroup), ]
+
+gap <- data.frame(AgeGroup = factor(LABEL_ORDER, levels = LABEL_ORDER))
+gap$A_gap <- grp$A_weighted[grp$Sex == "Women"] - grp$A_weighted[grp$Sex == "Men"]
+gap$A_gap_minutes <- gap$A_gap / THETA
+gap$c_gap <- grp$c_weighted[grp$Sex == "Women"] - grp$c_weighted[grp$Sex == "Men"]
+
+write.csv(grp, file.path(out_dir, "group_accessibility.csv"), row.names = FALSE)
+write.csv(gap, file.path(out_dir, "group_gaps.csv"), row.names = FALSE)
+print(grp, digits = 5, row.names = FALSE)
+print(gap, digits = 4, row.names = FALSE)
+```
+
+```{r fig-descriptive, fig.width = 6, fig.height = 4.5}
+line_fig <- function(y, ylab, title) {
+  ggplot(grp, aes(AgeGroup, .data[[y]], colour = Sex, group = Sex)) +
+    geom_line() + geom_point(size = 2) +
+    scale_colour_manual(values = sex_cols) +
+    scale_y_continuous(labels = fmt3) +
+    labs(x = "Age group", y = ylab, title = title) + theme_paper
+}
+gap_fig <- function(y, ylab, title) {
+  ggplot(gap, aes(AgeGroup, .data[[y]], group = 1)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_line(colour = "darkgreen") + geom_point(colour = "darkgreen", size = 2) +
+    scale_y_continuous(labels = fmt3) +
+    labs(x = "Age group", y = ylab, title = title) + theme_paper
+}
+
+figs <- list(
+  "logsum accessibility by sex and age.png" =
+    line_fig("A_weighted", "Logsum accessibility", "Potential accessibility by age group and sex"),
+  "gender difference in accessibility.png" =
+    gap_fig("A_gap", "Logsum accessibility", "Gender difference in potential accessibility (Women \u2212 Men)"),
+  "travel cost by sex and age.png" =
+    line_fig("c_weighted", "Mean travel cost (minutes)", "Realized travel cost by age group and sex"),
+  "gender difference in travel cost.png" =
+    gap_fig("c_gap", "Mean travel cost (minutes)", "Gender difference in realized travel cost (Women \u2212 Men)"))
+
+for (f in names(figs)) {
+  print(figs[[f]])
+  ggsave(file.path(out_dir, f), figs[[f]], width = 6, height = 4.5, dpi = 300)
+}
+```
+
+# 9. Robustness check: origin fixed-effects model (Appendix A)
+
+Same fixed-effect terms, 24 origin gu dummies instead of random intercepts,
+weighted least squares, standard errors clustered by park (CR1 correction).
+
+```{r fe-model, eval = params$run_fe_model}
+f_fe <- as.formula(paste("c_eq_min ~", paste(FIXED_TERMS, collapse = " + "),
+                         "+ INFLOW_CD"))
+fe <- lm(f_fe, data = dl, weights = w)
+
+# Park-clustered standard errors, computed by hand (no extra package needed)
+X  <- model.matrix(fe)
+u  <- residuals(fe) * dl$w            # weighted residuals
+XtWX_inv <- solve(crossprod(X, X * dl$w))
+scores <- rowsum(X * u, group = dl$ID) # sum of x_i * w_i * e_i within each park
+G <- nrow(scores); N <- nrow(X); K <- ncol(X)
+meat <- crossprod(scores)
+V_cl <- XtWX_inv %*% meat %*% XtWX_inv * (G / (G - 1)) * ((N - 1) / (N - K))
+
+fe_tab <- data.frame(term = colnames(X), Estimate = coef(fe), SE = sqrt(diag(V_cl)))
+fe_tab$p   <- 2 * pt(-abs(fe_tab$Estimate / fe_tab$SE), df = G - 1)
+fe_tab$Sig <- stars(fe_tab$p)
+fe_tab <- fe_tab[!grepl("^INFLOW_CD", fe_tab$term), ]
+write.csv(fe_tab, file.path(out_dir, "fe_model_clustered.csv"), row.names = FALSE)
+cat("R2:", round(summary(fe)$r.squared, 3), "\n")
+print(fe_tab[, -1], digits = 4)
+```
+
+# 10. Session information
+
+```{r session}
+sessionInfo()
+```

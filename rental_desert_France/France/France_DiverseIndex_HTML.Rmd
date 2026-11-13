@@ -1,0 +1,861 @@
+---
+title: "Diverse_Index_HTML"
+author: "dawon"
+date: "2024-12-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Install first Rsegregation from Arthur Gailes GitHub
+library(devtools)
+library(tidyverse)
+library(data.table)
+library(tigris)
+library(sf)
+library(rsegregation)
+library(RColorBrewer)
+library(ggplot2)
+library(dplyr)
+```
+
+#Rental Share and Owner share of each Metropolis
+```{r}
+iris_with_population <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Population.shp")
+
+france_rental <- st_read("/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/france_rental.csv")
+
+# Perform the spatial join using 'st_join'
+# This will match geometries based on spatial relationships
+iris_with_population_and_rental <- iris_with_population %>%
+    left_join(france_rental, by = c("CODE_IR" = "IRIS"))
+
+
+iris_with_population_and_rental <- iris_with_population_and_rental %>%
+  select(-ends_with(".y")) %>%
+  # Optionally, rename columns to remove the .x suffix if needed
+  rename_with(~ gsub("\\.x$", "", .))
+
+# Convert 'P21_PMEN' to numeric, and handle any coercion warnings
+iris_with_population_and_rental$P21_PMEN <- as.numeric(iris_with_population_and_rental$P21_PMEN)
+
+## Convert 'rental_sh' to numeric with proper handling
+iris_with_population_and_rental <- iris_with_population_and_rental %>%
+  mutate(rental_sh = as.numeric(rental_sh))
+
+# Rejoining and summarizing as intended
+top_100_urban_units <- iris_with_population_and_rental %>%
+  group_by(UU2020) %>%
+  summarize(total_population = sum(P21_PMEN, na.rm = TRUE)) %>%
+  arrange(desc(total_population)) %>%
+  slice_head(n = 100)
+
+# Ensure both datasets are data frames
+iris_df <- st_drop_geometry(iris_with_population_and_rental)
+urban_units_df <- st_drop_geometry(top_100_urban_units)
+
+# Perform a standard join on the 'UU2020' column
+france_metro_shares <- iris_df %>%
+  left_join(urban_units_df, by = "UU2020") %>%
+  group_by(libgeo) %>%
+  summarise(
+    metro_rental_share = mean(rental_sh, na.rm = TRUE),
+    metro_owner_share = 100 - metro_rental_share
+  )
+
+# View the resulting summarization
+print(france_metro_shares)
+```
+
+#Calculating Divergence Value
+```{r echo = T, results = 'hide'}
+# Ensure column names for joining are correctly cased and named
+# Ensure 'rental_sh' and other relevant fields are numeric
+iris_with_population_and_rental <- iris_with_population_and_rental %>%
+  mutate(rental_sh = as.numeric(rental_sh))
+
+# Ensure both data sets are data frames and adjust any potential mismatches in key names
+# If top_100_urban_units or france_metro_shares are sf objects, convert them to data frames first
+df_top_100_urban_units <- st_drop_geometry(top_100_urban_units)
+df_france_metro_shares <- st_drop_geometry(france_metro_shares)
+
+# Join the data sets based on proper column names, ensuring all are data frames
+divergence_values <- iris_with_population_and_rental %>%
+  left_join(df_top_100_urban_units, by = "UU2020") %>%
+  left_join(df_france_metro_shares, by = "libgeo") %>%  # Assuming consistent key naming
+  mutate(
+    owner_sh = 100 - rental_sh,  # Calculate owner share
+    divergence_value = (
+      rental_sh * log(rental_sh / metro_rental_share) +
+      owner_sh * log(owner_sh / metro_owner_share)
+    )
+  ) %>%
+  select(libgeo, codgeo, IRIS, UU2020,CODE_IR,rental_sh, owner_sh, divergence_value)  # Correct case of column name "UU2020"
+```
+
+#Mapping IRIS-Level Divergence Index Values for Housing Tenure
+```{r}
+# Load and prepare the shapefile with polygons
+iris_with_boundaries <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_Combined_Data.shp")
+
+# Convert CRS to WGS 84 (EPSG: 4326)
+iris_with_boundaries <- st_transform(iris_with_boundaries, crs = 4326)
+divergence_values <- st_transform(divergence_values, crs = 4326)
+
+# Assuming divergence_values is a data frame, make it an `sf` object if not already
+divergence_values_sf <- st_as_sf(divergence_values, coords = c("longitude", "latitude"), crs = 4326, agr = "constant") 
+
+# Ensure divergence_values includes the necessary geometry (join on libgeo if matching)
+divergence_values_sf <- divergence_values_sf %>%
+  select(CODE_IR, divergence_value)
+
+# Spatial join (ensure correct order and usage)
+map_data <- iris_with_boundaries %>%
+  st_join(divergence_values_sf, left = TRUE)
+
+# Filter out areas with NA divergence values
+map_data <- map_data %>%
+  filter(!is.na(divergence_value))
+
+# Calculate unique breaks using quantiles
+breaks <- unique(quantile(map_data$divergence_value, probs = seq(0, 1, 0.25), na.rm = TRUE))
+if (length(breaks) < 5) {
+  breaks <- seq(min(map_data$divergence_value, na.rm = TRUE),
+                max(map_data$divergence_value, na.rm = TRUE),
+                length.out = 5)
+}
+
+# Categorize divergence values
+map_data <- map_data %>%
+  mutate(
+    divergence_category = cut(divergence_value, breaks = breaks,
+                              labels = c("Least Divergent", "Second Quartile", "Third Quartile", "Most Divergent"),
+                              include.lowest = TRUE, right = FALSE)
+  )
+
+# Plot using ggplot2
+ggplot(data = map_data) +
+  geom_sf(aes(fill = divergence_category)) +
+  scale_fill_manual(values = c("Least Divergent" = "#c6dbef", 
+                               "Second Quartile" = "#9ecae1", 
+                               "Third Quartile" = "#6baed6", 
+                               "Most Divergent" = "#3182bd"),
+                    na.value = "grey50", 
+                    name = "Divergence Index\nValue (Quartile)") +
+  labs(title = "IRIS-Level Divergence Index Values for Housing Tenure") +
+  theme_minimal()
+```
+
+#Mapping Metropolis-Level Divergence Index Values for Housing Tenure#
+```{r}
+# Assumes that divergence_values is updated and contains 'UU2020' column
+
+# Load and prepare the metro-level shapefile
+metro_shapefile <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/uu2020_2024/uu2020_2024.shp")
+
+# Summarizing divergence_values at the metro level by averaging divergence values
+metro_divergence <- divergence_values %>%
+  group_by(UU2020) %>%
+  summarize(avg_divergence_value = mean(divergence_value, na.rm = TRUE))
+
+# Convert metro_divergence to a regular data frame if needed
+metro_divergence <- as.data.frame(metro_divergence)
+
+# Join the metro divergence data with the metro shapefile
+map_data_metro <- metro_shapefile %>%
+  dplyr::left_join(metro_divergence, by = c("uu2020" = "UU2020"))
+
+# Check and filter out areas with NA divergence values if necessary
+map_data_metro <- map_data_metro %>%
+  filter(!is.na(avg_divergence_value))
+
+# Proceed with calculating breaks and plotting
+breaks_metro <- unique(quantile(map_data_metro$avg_divergence_value, probs = seq(0, 1, 0.25), na.rm = TRUE))
+
+if (length(breaks_metro) < 5) {
+  breaks_metro <- seq(min(map_data_metro$avg_divergence_value, na.rm = TRUE),
+                      max(map_data_metro$avg_divergence_value, na.rm = TRUE),
+                      length.out = 5)
+}
+
+map_data_metro <- map_data_metro %>%
+  mutate(
+    divergence_category = cut(
+      avg_divergence_value,
+      breaks = breaks_metro,
+      labels = c("Least Divergent", "Second Quartile", "Third Quartile", "Most Divergent"),
+      include.lowest = TRUE,
+      right = FALSE
+    )
+  )
+
+# Plot
+ggplot(data = map_data_metro) +
+  geom_sf(aes(fill = divergence_category)) +
+  scale_fill_manual(values = c("Least Divergent" = "#c6dbef", 
+                               "Second Quartile" = "#9ecae1", 
+                               "Third Quartile" = "#6baed6", 
+                               "Most Divergent" = "#3182bd"),
+                    na.value = "grey50", 
+                    name = "Divergence Index\nValue (Quartile)") +
+  labs(title = "Metro-Level Divergence Index Values for Housing Tenure") +
+  theme_minimal()
+```
+
+#Top 10 Divergent Metropolis and Paris
+```{r}
+metro_divergence <- divergence_values %>%
+  group_by(UU2020) %>%
+  summarize(
+    avg_divergence_value = mean(divergence_value, na.rm = TRUE),
+    libgeo = first(libgeo),  # Get the first occurrence of 'libgeo' within each group
+    CODE_IRIS = first(CODE_IR)  # Get the first occurrence of 'CODE_IRIS' within each group
+  )
+
+# Sort and select top 10 metros based on avg_divergence_value
+top_10_metros <- metro_divergence %>%
+  arrange(desc(avg_divergence_value)) %>%
+  slice(1:10)
+
+# Assume you know the specific UU2020 code for Paris, replace "PARIS_CODE" with the actual code
+paris_code <- "00851"  # Replace with actual Paris code
+
+# Check if Paris is included
+is_paris_included <- paris_code %in% top_10_metros$UU2020
+
+# If Paris is not included, add it manually
+if (!is_paris_included) {
+  paris_divergence <- metro_divergence %>%
+    filter(UU2020 == paris_code)
+  top_10_metros <- bind_rows(top_10_metros, paris_divergence)
+}
+
+# Ensure the list is top 10 plus Paris, totaling 11 entries without duplicates
+top_10_plus_paris <- top_10_metros %>%
+  distinct(UU2020, .keep_all = TRUE)
+
+# Print the list with their divergence values
+print("Top 10 Metros and Paris with Divergence Index Value:")
+print(top_10_plus_paris)
+```
+
+#Top 10 Divergence Index Metropolis in IRIS level
+```{r}
+
+# Convert `top_10_plus_paris` to a data frame
+top_10_plus_paris_df <- as.data.frame(top_10_plus_paris)
+
+# Convert `divergence_values` to a data frame if it's an sf object
+divergence_values_df <- as.data.frame(divergence_values)
+
+# Loop over each metro in top_10_plus_paris
+for (metro in top_10_plus_paris_df$UU2020) {
+  # Filter IRIS data for each metro
+  iris_data <- iris_with_boundaries %>%
+    filter(u2020_x == metro)
+  
+  # Get the corresponding libge_x for the current metro
+  metro_name <- unique(iris_data$libge_x)[1]
+
+  # Add divergence categories or other relevant attributes if needed
+  iris_data <- iris_data %>%
+    left_join(divergence_values_df, by = "CODE_IR") %>%
+    mutate(
+      divergence_category = case_when(
+        divergence_value >= quantile(divergence_value, 0.75, na.rm = TRUE) ~ "Most Divergent",
+        divergence_value >= quantile(divergence_value, 0.5, na.rm = TRUE) ~ "Third Quartile",
+        divergence_value >= quantile(divergence_value, 0.25, na.rm = TRUE) ~ "Second Quartile",
+        TRUE ~ "Least Divergent"
+      )
+    )
+
+  # Create the map plot
+  map_plot <- ggplot(data = iris_data) +
+    geom_sf(aes(fill = divergence_category), color = "black", size = 0.2) +
+    scale_fill_manual(values = c("Least Divergent" = "#c6dbef", 
+                                 "Second Quartile" = "#9ecae1", 
+                                 "Third Quartile" = "#6baed6", 
+                                 "Most Divergent" = "#3182bd"),
+                      na.value = "grey70", 
+                      name = "Divergence Category") +
+    labs(
+      title = paste("Divergence Index Map for Metro:", metro_name),
+      fill = "Divergence Category"
+    ) +
+    theme_minimal() +
+    theme(panel.background = element_rect(fill = "white", color = NA),
+          plot.title = element_text(hjust = 0.5))
+
+  # Print the map plot
+  print(map_plot)
+}
+```
+
+#Top 10 Divergent Metropolis and Paris
+```{r}
+metro_divergence <- divergence_values %>%
+  group_by(UU2020) %>%
+  summarize(
+    avg_divergence_value = mean(divergence_value, na.rm = TRUE),
+    libgeo = first(libgeo),  # Get the first occurrence of 'libgeo' within each group
+    CODE_IRIS = first(CODE_IR)  # Get the first occurrence of 'CODE_IRIS' within each group
+  )
+
+# Sort and select top 10 metros based on avg_divergence_value
+top_10_metros <- metro_divergence %>%
+  arrange(desc(avg_divergence_value)) %>%
+  slice(1:10)
+
+# Assume you know the specific UU2020 code for Paris, replace "PARIS_CODE" with the actual code
+paris_code <- "00851"  # Replace with actual Paris code
+
+# Check if Paris is included
+is_paris_included <- paris_code %in% top_10_metros$UU2020
+
+# If Paris is not included, add it manually
+if (!is_paris_included) {
+  paris_divergence <- metro_divergence %>%
+    filter(UU2020 == paris_code)
+  top_10_metros <- bind_rows(top_10_metros, paris_divergence)
+}
+
+# Ensure the list is top 10 plus Paris, totaling 11 entries without duplicates
+top_10_plus_paris <- top_10_metros %>%
+  distinct(UU2020, .keep_all = TRUE)
+
+# Print the list with their divergence values
+print("Top 10 Metros and Paris with Divergence Index Value:")
+print(top_10_plus_paris)
+```
+
+#Top 10 Populated Metro's Divergence Index Metropolis in IRIS level
+```{r}
+# Convert `top_10_plus_paris` to a data frame
+top_10_urban_units_dataset <- as.data.frame(top_10_urban_units_dataset)
+
+# Convert `divergence_values` to a data frame if it's an sf object
+divergence_values_df <- as.data.frame(divergence_values)
+
+# Loop over each metro in top_10_plus_paris
+for (metro in top_10_urban_units_dataset$lib2020) {
+  # Filter IRIS data for each metro
+  iris_data <- iris_with_boundaries %>%
+    filter(lib2020 == metro)
+  
+  # Get the corresponding libge_x for the current metro
+  metro_name <- unique(iris_data$libge_x)[1]
+
+  # Add divergence categories or other relevant attributes if needed
+  iris_data <- iris_data %>%
+    left_join(divergence_values_df, by = "CODE_IR") %>%
+    mutate(
+      divergence_category = case_when(
+        divergence_value >= quantile(divergence_value, 0.75, na.rm = TRUE) ~ "Most Divergent",
+        divergence_value >= quantile(divergence_value, 0.5, na.rm = TRUE) ~ "Third Quartile",
+        divergence_value >= quantile(divergence_value, 0.25, na.rm = TRUE) ~ "Second Quartile",
+        TRUE ~ "Least Divergent"
+      )
+    )
+
+  # Create the map plot
+  map_plot <- ggplot(data = iris_data) +
+    geom_sf(aes(fill = divergence_category), color = "black", size = 0.2) +
+    scale_fill_manual(values = c("Least Divergent" = "#c6dbef", 
+                                 "Second Quartile" = "#9ecae1", 
+                                 "Third Quartile" = "#6baed6", 
+                                 "Most Divergent" = "#3182bd"),
+                      na.value = "grey70", 
+                      name = "Divergence Category") +
+    labs(
+      title = paste("Divergence Index Map for Metro:", metro_name),
+      fill = "Divergence Category"
+    ) +
+    theme_minimal() +
+    theme(panel.background = element_rect(fill = "white", color = NA),
+          plot.title = element_text(hjust = 0.5))
+
+  # Print the map plot
+  print(map_plot)
+}
+```
+
+```{r}
+library(openxlsx) 
+# Initialize a list to store data for Excel export
+excel_data_list <- list()
+
+# Loop over each metro in top_10_urban_units_dataset
+for (metro in top_10_urban_units_dataset$uu2020) {
+  
+  # Filter IRIS data for the current metro
+  iris_data <- iris_with_boundaries %>%
+    filter(u2020_x == metro)
+  
+  # Get the metro name (handle potential NA values)
+  metro_name <- unique(iris_data$libge_x)[1]
+  
+  # Ensure `divergence_values_df` has relevant data before merging
+  if (!"CODE_IR" %in% names(divergence_values_df)) {
+    stop("Error: `divergence_values_df` must contain `CODE_IR` column.")
+  }
+  
+  # Merge and handle missing values
+  iris_data <- iris_data %>%
+    left_join(divergence_values_df, by = "CODE_IR") %>%
+    mutate(divergence_value = ifelse(is.na(divergence_value), 0, divergence_value)) %>%
+    mutate(
+      divergence_category = case_when(
+        divergence_value >= quantile(divergence_value, 0.75, na.rm = TRUE) ~ "Most Divergent",
+        divergence_value >= quantile(divergence_value, 0.5, na.rm = TRUE) ~ "Third Quartile",
+        divergence_value >= quantile(divergence_value, 0.25, na.rm = TRUE) ~ "Second Quartile",
+        TRUE ~ "Least Divergent"
+      )
+    )
+
+  # Store the processed data for Excel export
+  excel_data_list[[paste0(metro_name, "_", metro)]] <- iris_data
+
+excel_data_list <- lapply(excel_data_list, function(df) {
+  df %>%
+    mutate(across(where(is.factor), as.character)) %>%  # Convert factors to characters
+    mutate(across(where(is.list), ~sapply(., toString))) %>%  # Convert lists to strings
+    st_drop_geometry()  # Drop spatial geometry if it's an sf object
+})
+
+# Export list of data frames to an Excel file
+write.xlsx(excel_data_list, file = "Divergence_Index_Metros_top10populated.xlsx")
+``` 
+
+#Top 100 Populated Metro's Divergence Index Metropolis in IRIS level
+```{r}
+# Convert `top_10_plus_paris` to a data frame
+top_100_urban_units_dataset <- as.data.frame(top_100_urban_units_dataset)
+
+# Convert `divergence_values` to a data frame if it's an sf object
+divergence_values_df <- as.data.frame(divergence_values)
+
+# Loop over each metro in top_10_plus_paris
+for (metro in top_100_urban_units_dataset$uu2020) {
+  # Filter IRIS data for each metro
+  iris_data <- iris_with_boundaries %>%
+    filter(u2020_x == metro)
+  
+  # Get the corresponding libge_x for the current metro
+  metro_name <- unique(iris_data$libge_x)[1]
+
+  # Add divergence categories or other relevant attributes if needed
+  iris_data <- iris_data %>%
+    left_join(divergence_values_df, by = "CODE_IR") %>%
+    mutate(
+      divergence_category = case_when(
+        divergence_value >= quantile(divergence_value, 0.75, na.rm = TRUE) ~ "Most Divergent",
+        divergence_value >= quantile(divergence_value, 0.5, na.rm = TRUE) ~ "Third Quartile",
+        divergence_value >= quantile(divergence_value, 0.25, na.rm = TRUE) ~ "Second Quartile",
+        TRUE ~ "Least Divergent"
+      )
+    )
+
+  # Create the map plot
+  map_plot <- ggplot(data = iris_data) +
+    geom_sf(aes(fill = divergence_category), color = "black", size = 0.2) +
+    scale_fill_manual(values = c("Least Divergent" = "#c6dbef", 
+                                 "Second Quartile" = "#9ecae1", 
+                                 "Third Quartile" = "#6baed6", 
+                                 "Most Divergent" = "#3182bd"),
+                      na.value = "grey70", 
+                      name = "Divergence Category") +
+    labs(
+      title = paste("Divergence Index Map for Metro:", metro_name),
+      fill = "Divergence Category"
+    ) +
+    theme_minimal() +
+    theme(panel.background = element_rect(fill = "white", color = NA),
+          plot.title = element_text(hjust = 0.5))
+
+  # Print the map plot
+  print(map_plot)
+}
+```
+
+```{r}
+# Function to shorten sheet names dynamically
+shorten_sheet_name <- function(metro_name, metro_code) {
+  clean_name <- gsub("[^A-Za-z0-9]", "_", metro_name)  # Clean name by removing special chars
+  short_name <- substr(paste0(clean_name, "_", metro_code), 1, 31)  # Ensure it's 31 characters max
+  return(short_name)
+}
+
+# Initialize a list to store data for Excel export
+excel_data_list <- list()
+
+# Loop over each metro in top_100_urban_units_dataset
+for (metro in top_100_urban_units_dataset$uu2020) {
+  
+  # Filter IRIS data for the current metro
+  iris_data <- iris_with_boundaries %>%
+    filter(u2020_x == metro)
+  
+  # Get the metro name (handle potential NA values)
+  metro_name <- unique(iris_data$libge_x)[1]
+  
+  # Generate a safe sheet name using the shorten function
+  sheet_name <- shorten_sheet_name(metro_name, metro)
+  
+  # Ensure `divergence_values_df` has relevant data before merging
+  if (!"CODE_IR" %in% names(divergence_values_df)) {
+    stop("Error: `divergence_values_df` must contain `CODE_IR` column.")
+  }
+  
+  # Merge and handle missing values
+  iris_data <- iris_data %>%
+    left_join(divergence_values_df, by = "CODE_IR") %>%
+    mutate(
+      divergence_value = ifelse(is.na(divergence_value), 0, divergence_value),
+      divergence_category = case_when(
+        divergence_value >= quantile(divergence_value, 0.75, na.rm = TRUE) ~ "Most Divergent",
+        divergence_value >= quantile(divergence_value, 0.5, na.rm = TRUE) ~ "Third Quartile",
+        divergence_value >= quantile(divergence_value, 0.25, na.rm = TRUE) ~ "Second Quartile",
+        TRUE ~ "Least Divergent"
+      )
+    )
+  
+  # Check if there are any 'list' columns and convert them to strings
+  iris_data <- iris_data %>%
+    mutate(across(where(function(x) is.list(x)), ~sapply(., toString)))  # Convert lists to strings
+  
+  # Handle potential NaN values by replacing them with 0
+  iris_data <- iris_data %>%
+    mutate(across(where(function(x) any(is.nan(x))), ~ifelse(is.nan(.), 0, .)))  # Replace NaN with 0
+  
+  # Store the processed data for Excel export using the cleaned sheet name
+  excel_data_list[[sheet_name]] <- iris_data
+  
+  # Save the plot as an image
+  ggsave(filename = paste0("top_100pop_divergence_map_", metro, ".png"), plot = map_plot, width = 10, height = 6)
+}
+
+# Export list of data frames to an Excel file
+write.xlsx(excel_data_list, file = "Divergence_Index_Metros_top100populated.xlsx")
+``` 
+
+```{r echo = T, results = 'hide'}
+# Step 1: Filter and Prepare Data
+# Filter the divergence values for the top metros including Paris
+selected_uu2020 <- top_10_plus_paris$UU2020
+
+# Include all necessary columns and calculate quartiles
+iris_divergence_selected_df <- divergence_values %>%
+  filter(UU2020 %in% selected_uu2020) %>%
+  select(CODE_IR,libgeo, rental_sh, owner_sh, UU2020, divergence_value) %>%
+  group_by(UU2020) %>%
+  mutate(
+    divergence_quartile = ntile(divergence_value, 4)
+  ) %>%
+  ungroup() %>%
+  as.data.frame()
+
+# Step 2: Load IRIS boundaries
+iris_boundaries <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_Combined_Data.shp")
+
+# Ensure columns match for joining
+map_data_iris <- iris_boundaries %>%
+  left_join(iris_divergence_selected_df, by = "CODE_IR") %>%
+  filter(UU2020 %in% selected_uu2020)
+
+# Step 3: Categorization based on quartiles
+map_data_iris <- map_data_iris %>%
+  mutate(
+    divergence_category = case_when(
+      divergence_quartile == 4 & rental_sh > owner_sh ~ "Most Divergent, High-Rental",
+      divergence_quartile == 4 & rental_sh <= owner_sh ~ "Most Divergent, High-Owner",
+      divergence_quartile < 4 & rental_sh > owner_sh ~ "Less Divergent, High-Rental",
+      TRUE ~ "Less Divergent, High-Owner"
+    )
+  )
+```
+
+#Divergence Categories for Housing Tenure of Top 10 Divergent Metropolis with Paris
+```{r}
+# Filter IRISs for the selected top divergences including Paris
+selected_libgeo <- top_10_plus_paris$libgeo
+
+# Iterate over each metro's `libgeo`
+for (metro_name in selected_libgeo) {
+  # Filter data for each metro
+  metro_data <- map_data_iris %>%
+    filter(libgeo == metro_name)
+  
+  # Create a map for divergence categories
+  map_plot <- ggplot(data = metro_data) +
+    geom_sf(aes(fill = divergence_category), color = "black", size = 0.2) +
+    scale_fill_manual(values = c("Most Divergent, High-Rental" = "#08519c",
+                                 "Most Divergent, High-Owner" = "#6a51a3",
+                                 "Less Divergent, High-Rental" = "#9ecae1",
+                                 "Less Divergent, High-Owner" = "#cbc9e2"),
+                      na.value = "grey70", 
+                      name = "Divergence Category") +
+    labs(
+      title = paste("Divergence Index Map for", metro_name),
+      fill = "Divergence Category"
+    ) +
+    theme_minimal() +
+    theme(panel.background = element_rect(fill = "white", color = NA),
+          plot.title = element_text(hjust = 0.5))
+  
+  # Print the map plot
+  print(map_plot)
+  
+  # Uncomment to save each plot
+  # ggsave(filename = paste0("Divergence_Map_", gsub(" ", "_", metro_name), ".png"), 
+  #        plot = map_plot, width = 8, height = 6)
+}
+```
+
+#Divergence Categories for Housing Tenure of Top 10 Populated Metropolis with Paris
+```{r}
+# Identify top 10 metros by population
+top_10_populated_metros <- top_100_urban_units %>%
+  arrange(desc(total_population)) %>%
+  slice_head(n = 10) %>%
+  pull(UU2020)
+
+# Extract corresponding `libgeo` for these metros
+top_10_populated_libgeo <- map_data_iris %>%
+  filter(UU2020 %in% top_10_populated_metros) %>%
+  distinct(libgeo) %>%
+  slice_head(n = 11) %>%
+  pull(libgeo)
+
+# Loop and create maps for each of these top populated metros
+for (metro_name in top_10_populated_libgeo) {
+  # Filter data for each metro
+  metro_data <- map_data_iris %>%
+    filter(libgeo == metro_name)
+  
+  # Create a map for divergence categories
+  map_plot <- ggplot(data = metro_data) +
+    geom_sf(aes(fill = divergence_category), color = "black", size = 0.2) +
+    scale_fill_manual(values = c("Most Divergent, High-Rental" = "#08519c",
+                                 "Most Divergent, High-Owner" = "#6a51a3",
+                                 "Less Divergent, High-Rental" = "#9ecae1",
+                                 "Less Divergent, High-Owner" = "#cbc9e2"),
+                      na.value = "grey70", 
+                      name = "Divergence Category") +
+    labs(
+      title = paste("Divergence Index Map for", metro_name),
+      fill = "Divergence Category"
+    ) +
+    theme_minimal() +
+    theme(panel.background = element_rect(fill = "white", color = NA),
+          plot.title = element_text(hjust = 0.5))
+  
+  # Print the map plot
+  print(map_plot)
+  
+  # Uncomment to save each plot
+  # ggsave(filename = paste0("Divergence_Map_", gsub(" ", "_", metro_name), ".png"), 
+  #        plot = map_plot, width = 8, height = 6)
+}
+```
+
+#Divergence of Housing Tenure Is Associated with Income Segregation
+```{r}
+# Load income data
+income_data <- read_csv("/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/Updated_IRIS_with_Income.csv")
+
+# Categorize IRISs into income brackets based on median income
+income_data <- income_data %>%
+  mutate(
+    income_category = case_when(
+      DEC_MED21 < 20000 ~ "Lower",
+      DEC_MED21 >= 20000 & DEC_MED21 < 40000 ~ "Middle",
+      DEC_MED21 >= 40000 ~ "Higher"
+    )
+  )
+
+# Calculate the share of each category per metro
+income_shares <- income_data %>%
+  group_by(UU2020, income_category) %>%
+  summarize(count = n()) %>%
+  group_by(UU2020) %>%
+  mutate(
+    share = count / sum(count)
+  ) %>%
+  select(UU2020, income_category, share)
+
+# Calculate metro-level shares for income categories
+metro_shares <- income_shares %>%
+  group_by(income_category) %>%
+  summarize(metro_share = mean(share, na.rm = TRUE))
+
+# Calculate income divergence index
+income_divergence <- income_shares %>%
+  left_join(metro_shares, by = "income_category") %>%
+  mutate(
+    divergence_component = share * log(share / metro_share)
+  ) %>%
+  group_by(UU2020) %>%
+  summarize(income_divergence_index = sum(divergence_component, na.rm = TRUE))
+
+# Merge with housing divergence
+merged_data <- metro_divergence %>%
+  left_join(income_divergence, by = "UU2020")
+
+# Plotting the relationship
+ggplot(merged_data, aes(x = avg_divergence_value, y = income_divergence_index)) +
+  geom_point(color = "#4b0082", size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "steelblue") +
+  labs(
+    x = "Housing Divergence Index Value",
+    y = "Income Divergence Index Value",
+    title = "Housing Divergence vs. Income Segregation"
+  ) +
+  theme_minimal()
+```
+
+#Map of Divergence of Housing Tenure - Income Segregation Association
+```{r}
+# Load metro shapefile
+metro_shapefile <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/uu_without_overseas/uu_without_overseas.shp")
+## Assuming `income_divergence` and `metro_divergence` are calculated as per your method
+
+# Determine thresholds for high/low segregation
+housing_threshold <- median(metro_divergence$avg_divergence_value, na.rm = TRUE)
+income_threshold <- median(income_divergence$income_divergence_index, na.rm = TRUE)
+
+# Create a dataframe for segregation mapping
+segregation_data <- metro_divergence %>%
+  left_join(income_divergence, by = "UU2020") %>%
+  mutate(
+    segregation_type = case_when(
+      avg_divergence_value >= housing_threshold & income_divergence_index >= income_threshold ~ "High Housing, High Income Segregation",
+      avg_divergence_value >= housing_threshold & income_divergence_index < income_threshold ~ "High Housing, Low Income Segregation",
+      avg_divergence_value < housing_threshold & income_divergence_index >= income_threshold ~ "Low Housing, High Income Segregation",
+      TRUE ~ "Low Housing, Low Income Segregation"
+    )
+  )
+
+# Ensure `segregation_data` is compatible for join
+segregation_data_df <- as.data.frame(segregation_data)
+
+# Join with the shapefile
+map_data <- metro_shapefile %>%
+  left_join(segregation_data_df, by = c("uu2020" = "UU2020"))
+
+# Plot the map
+ggplot(map_data) +
+  geom_sf(aes(fill = segregation_type), color = NA) +
+  scale_fill_manual(values = c(
+    "High Housing, High Income Segregation" = "#6a51a3",
+    "High Housing, Low Income Segregation" = "#9ecae1",
+    "Low Housing, High Income Segregation" = "#807dba",
+    "Low Housing, Low Income Segregation" = "#bcbddc"
+  )) +
+  labs(title = "Metro Areas with High Housing and High Income Segregation",
+       fill = "Segregation Type") +
+  theme_minimal() 
+```
+
+#Divergence of Housing Tenure Is Associated with Building Age Segregation
+```{r}
+
+# Convert necessary columns to numeric
+iris_with_population_and_rental <- iris_with_population_and_rental %>%
+  mutate(
+    P21_RP_ACH19 = as.numeric(as.character(P21_RP_ACH19)),
+    P21_RP_ACH45 = as.numeric(as.character(P21_RP_ACH45)),
+    P21_RP_ACH70 = as.numeric(as.character(P21_RP_ACH70)),
+    P21_RP_ACH90 = as.numeric(as.character(P21_RP_ACH90)),
+    P21_RP_ACH05 = as.numeric(as.character(P21_RP_ACH05)),
+    P21_RP_ACH18 = as.numeric(as.character(P21_RP_ACH18)),
+    P21_RP_ACHTOT = as.numeric(as.character(P21_RP_ACHTOT))
+  )
+
+# Calculate the entropy index for building age
+iris_with_population_and_rental <- iris_with_population_and_rental %>%
+  mutate(
+    share_ACH19 = P21_RP_ACH19 / P21_RP_ACHTOT,
+    share_ACH45 = P21_RP_ACH45 / P21_RP_ACHTOT,
+    share_ACH70 = P21_RP_ACH70 / P21_RP_ACHTOT,
+    share_ACH90 = P21_RP_ACH90 / P21_RP_ACHTOT,
+    share_ACH05 = P21_RP_ACH05 / P21_RP_ACHTOT,
+    share_ACH18 = P21_RP_ACH18 / P21_RP_ACHTOT
+  ) %>%
+  rowwise() %>%
+  mutate(
+    building_age_entropy_index = -(
+      sum(
+        c(share_ACH19, share_ACH45, share_ACH70, share_ACH90, share_ACH05, share_ACH18) * 
+        log(c(share_ACH19, share_ACH45, share_ACH70, share_ACH90, share_ACH05, share_ACH18)), 
+        na.rm = TRUE
+      )
+    )
+  ) %>%
+  ungroup()
+
+# Summarize the entropy index at the metro level
+building_age_divergence <- iris_with_population_and_rental %>%
+  group_by(UU2020) %>%
+  summarize(building_age_divergence_index = mean(building_age_entropy_index, na.rm = TRUE))
+
+
+# Ensure building_age_divergence is a data frame
+building_age_divergence_df <- as.data.frame(building_age_divergence)
+
+# Merge with housing divergence
+merged_data <- metro_divergence %>%
+  as.data.frame() %>%  # Ensure metro_divergence is also a data frame
+  left_join(building_age_divergence_df, by = "UU2020")
+
+# Plotting the relationship
+ggplot(merged_data, aes(x = avg_divergence_value, y = building_age_divergence_index)) +
+  geom_point(color = "#4b0082", size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "steelblue") +
+  labs(
+    x = "Housing Divergence Index Value",
+    y = "Building Age Entropy Index Value",
+    title = "Housing Divergence vs. Building Age Segregation"
+  ) +
+  theme_minimal()
+```
+
+#Map of Divergence of Housing Tenure - Building Age Segregation Association
+```{r}
+# Load metro shapefile
+metro_shapefile <- st_read("C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/France_maps/uu_without_overseas/uu_without_overseas.shp")
+
+# Ensure `building_age_divergence` is a regular data frame
+building_age_divergence_df <- as.data.frame(building_age_divergence)
+
+housing_threshold <- median(metro_divergence$avg_divergence_value, na.rm = TRUE)
+building_age_threshold <- median(building_age_divergence$building_age_divergence_index, na.rm = TRUE)
+
+# Create a dataframe for segregation mapping
+segregation_data <- metro_divergence %>%
+  as.data.frame() %>%  # Ensure metro_divergence is a data frame
+  left_join(building_age_divergence_df, by = "UU2020") %>%
+  mutate(
+    segregation_type = case_when(
+      avg_divergence_value >= housing_threshold & building_age_divergence_index >= building_age_threshold ~ "High Housing, High Building Age Segregation",
+      avg_divergence_value >= housing_threshold & building_age_divergence_index < building_age_threshold ~ "High Housing, Low Building Age Segregation",
+      avg_divergence_value < housing_threshold & building_age_divergence_index >= building_age_threshold ~ "Low Housing, High Building Age Segregation",
+      TRUE ~ "Low Housing, Low Building Age Segregation"
+    )
+  )
+
+# Join with the shapefile
+map_data <- metro_shapefile %>%
+  left_join(segregation_data, by = c("uu2020" = "UU2020"))
+
+# Plot the map
+ggplot(map_data) +
+  geom_sf(aes(fill = segregation_type), color = NA) +
+  scale_fill_manual(values = c(
+    "High Housing, High Building Age Segregation" = "#6a51a3",
+    "High Housing, Low Building Age Segregation" = "#9ecae1",
+    "Low Housing, High Building Age Segregation" = "#807dba",
+    "Low Housing, Low Building Age Segregation" = "#bcbddc"
+  )) +
+  labs(title = "Metro Areas with High Housing and Building Age Segregation",
+       fill = "Segregation Type") +
+  theme_minimal()
+```

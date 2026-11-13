@@ -1,0 +1,858 @@
+---
+title: "France Rental Deserts — Figures 1–5"
+author: "dawon"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 8, fig.height = 5, dpi = 300)
+
+library(tidyverse)
+library(sf)
+library(ggplot2)
+```
+
+```{r paths-and-params}
+# ── UPDATE THIS ONE PATH ──────────────────────────────────────────────────────
+base_path <- "C:/Users/ohdaw/OneDrive/Documents/R_Projects/rental_desert/France/"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Output directory for saved PNGs (created if absent)
+fig_dir <- paste0(base_path, "figures/")
+if (!dir.exists(fig_dir)) dir.create(fig_dir)
+
+# Figure 3 city selector — change to any lib2020 name or UU2020 code
+FIGURE3_CITY <- "Paris"   # e.g. "Lyon", "Marseille-Aix-en-Provence", …
+
+# File paths
+path_pop_shp    <- paste0(base_path, "Updated_IRIS_with_Population.shp")
+path_rental_csv <- paste0(base_path, "france_rental.csv")
+path_income_csv <- paste0(base_path, "Updated_IRIS_with_Income.csv")
+path_iris_poly  <- paste0(base_path, "Updated_Combined_Data.shp")
+path_uu_shp     <- paste0(base_path, "France_maps/uu_without_overseas/uu_without_overseas.shp")
+```
+
+
+----------
+# 0  Shared colour palettes
+
+```{r palettes}
+# Figure 1 — tenure type bars (light → dark)
+pal_tenure <- c(
+  "Rental Deserts"            = "#D5C4D6",
+  "Mixed-Tenure\nNeighborhoods" = "#9B6B9B",
+  "High-Rental\nNeighborhoods"  = "#3D1A5E"
+)
+
+# Figures 2 — divergence quartile (light blue → dark purple)
+pal_quartile <- c(
+  "Least Divergent" = "#DEEAF5",
+  "Second Quartile" = "#9ECAE1",
+  "Third Quartile"  = "#6A51A3",
+  "Most Divergent"  = "#3D0966"
+)
+
+# Figure 3 — IRIS divergence type (4 categories + NA)
+pal_iris_type <- c(
+  "Most Divergent,\nHigh Rental"  = "#08306B",
+  "Most Divergent,\nHigh Owner"   = "#54278F",
+  "Less Divergent,\nHigh Rental"  = "#9ECAE1",
+  "Less Divergent,\nHigh Owner"   = "#BCBDDC"
+)
+
+# Figures 4 & 5 — 2×2 segregation type (dark → light)
+make_seg_pal <- function(label) {
+  setNames(
+    c("#4B0082", "#9B6BAB", "#AEC6D8", "#DCE8F4"),
+    c(
+      paste0("High Housing,\nHigh ", label),
+      paste0("High Housing,\nLow ",  label),
+      paste0("Low Housing,\nHigh ",  label),
+      paste0("Low Housing,\nLow ",   label)
+    )
+  )
+}
+pal_seg_income   <- make_seg_pal("Income\nSegregation")
+pal_seg_building <- make_seg_pal("Building Age\nSegregation")
+```
+
+```{r map-theme}
+# Shared ggplot theme for all choropleth maps
+theme_map <- function(legend_pos = c(0.14, 0.25)) {
+  theme_void() +
+    theme(
+      legend.position      = legend_pos,
+      legend.justification = c(0, 0.5),
+      legend.title         = element_text(size = 8, face = "bold",
+                                          lineheight = 1.1),
+      legend.text          = element_text(size = 7.5),
+      legend.key.size      = unit(0.35, "cm"),
+      legend.spacing.y     = unit(0.15, "cm"),
+      plot.background      = element_rect(fill = "white", color = NA),
+      panel.background     = element_rect(fill = "white", color = NA),
+      plot.margin          = margin(4, 4, 4, 4)
+    )
+}
+
+# Shared theme for the bar chart
+theme_bar <- function() {
+  theme_minimal(base_size = 11) +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.y = element_line(colour = "grey88", linetype = "dashed"),
+      axis.line.x        = element_line(colour = "grey60", size = 0.3),
+      axis.ticks.x       = element_line(colour = "grey60", size = 0.3),
+      axis.text          = element_text(size = 9),
+      axis.title.x       = element_text(size = 9, margin = margin(t = 6)),
+      axis.title.y       = element_blank(),
+      legend.position    = "bottom",
+      legend.title       = element_blank(),
+      legend.text        = element_text(size = 8),
+      legend.key.size    = unit(0.4, "cm"),
+      legend.spacing.x   = unit(0.3, "cm"),
+      plot.background    = element_rect(fill = "white", color = NA)
+    )
+}
+```
+
+
+----------
+# 1  Load and prepare data
+
+```{r load-iris}
+# ── IRIS point data + rental variables (mirrors France_DiverseIndex.Rmd) ──────
+iris_pop <- st_read(path_pop_shp, quiet = TRUE)
+france_rental <- read_csv(path_rental_csv, show_col_types = FALSE)
+
+iris_df <- iris_pop %>%
+  left_join(france_rental, by = c("CODE_IR" = "IRIS")) %>%
+  select(-ends_with(".y")) %>%
+  rename_with(~ gsub("\\.x$", "", .)) %>%
+  mutate(
+    across(c(P21_PMEN, rental_sh, P21_RP, P21_RPMAISON,
+             P21_RPAPPART, P21_LOGVAC, P21_LOG,
+             P21_RP_ACH19, P21_RP_ACH45, P21_RP_ACH70,
+             P21_RP_ACH90, P21_RP_ACH05, P21_RP_ACH18,
+             P21_RP_ACHTOT), as.numeric),
+    rental_sh = pmax(0, pmin(100, rental_sh)),   # clamp to [0,100]
+    owner_sh  = 100 - rental_sh,
+    tenure_type = case_when(
+      rental_sh <  20 ~ "Rental Deserts",
+      rental_sh >= 80 ~ "High-Rental\nNeighborhoods",
+      TRUE            ~ "Mixed-Tenure\nNeighborhoods"
+    ),
+    tenure_type = factor(tenure_type,
+      levels = c("Rental Deserts",
+                 "Mixed-Tenure\nNeighborhoods",
+                 "High-Rental\nNeighborhoods"))
+  ) %>%
+  st_drop_geometry()
+```
+
+```{r compute-divergence}
+# ── Top-100 UUs by population ─────────────────────────────────────────────────
+top_100_uu <- iris_df %>%
+  group_by(UU2020) %>%
+  summarise(total_pop = sum(P21_PMEN, na.rm = TRUE),
+            lib2020   = first(lib2020), .groups = "drop") %>%
+  filter(!str_detect(lib2020, "^Commune hors")) %>%   # ← ADD THIS
+  arrange(desc(total_pop)) %>%
+  slice_head(n = 100)
+
+cat("Top-100 UUs after filter:", nrow(top_100_uu), "\n")
+cat("Smallest UU:", tail(top_100_uu$lib2020, 1),
+    "-", tail(top_100_uu$total_pop, 1), "pop\n")
+
+# ── Metro-level rental shares ─────────────────────────────────────────────────
+metro_shares <- iris_df %>%
+  filter(UU2020 %in% top_100_uu$UU2020) %>%
+  group_by(UU2020) %>%
+  summarise(metro_rental_sh = mean(rental_sh, na.rm = TRUE),
+            metro_owner_sh  = 100 - metro_rental_sh, .groups = "drop")
+
+# ── IRIS-level divergence (same formula as France_DiverseIndex.Rmd) ───────────
+divergence_values <- iris_df %>%
+  filter(UU2020 %in% top_100_uu$UU2020) %>%
+  left_join(metro_shares, by = "UU2020") %>%
+  mutate(
+    divergence_value = rental_sh * log(rental_sh / metro_rental_sh) +
+                       owner_sh  * log(owner_sh  / metro_owner_sh)
+  )
+
+# ── Metro-level divergence (population-weighted mean) ────────────────────────
+metro_divergence <- divergence_values %>%
+  group_by(UU2020) %>%
+  summarise(
+    avg_divergence_value = weighted.mean(divergence_value,
+                                         w = P21_PMEN, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    div_quartile = ntile(avg_divergence_value, 4),
+    div_category = factor(
+      case_when(
+        div_quartile == 1 ~ "Least Divergent",
+        div_quartile == 2 ~ "Second Quartile",
+        div_quartile == 3 ~ "Third Quartile",
+        div_quartile == 4 ~ "Most Divergent"
+      ),
+      levels = c("Least Divergent", "Second Quartile",
+                 "Third Quartile",  "Most Divergent")
+    )
+  )
+
+cat("Metro divergence computed for", nrow(metro_divergence), "urban units\n")
+```
+
+```{r compute-income-divergence}
+# ── Income divergence (mirrors France_DiverseIndex.Rmd) ──────────────────────
+income_raw <- read_csv(path_income_csv, show_col_types = FALSE)
+
+income_iris <- income_raw %>%
+  filter(UU2020 %in% top_100_uu$UU2020) %>%
+  mutate(income_cat = case_when(
+    DEC_MED21 <  20000 ~ "Lower",
+    DEC_MED21 <  40000 ~ "Middle",
+    !is.na(DEC_MED21)  ~ "Higher",
+    TRUE               ~ NA_character_
+  )) %>%
+  filter(!is.na(income_cat))
+
+income_shares <- income_iris %>%
+  group_by(UU2020, income_cat) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(UU2020) %>%
+  mutate(iris_share = count / sum(count)) %>%
+  ungroup()
+
+metro_income_ref <- income_shares %>%
+  group_by(income_cat) %>%
+  summarise(metro_share = mean(iris_share, na.rm = TRUE), .groups = "drop")
+
+income_divergence <- income_shares %>%
+  left_join(metro_income_ref, by = "income_cat") %>%
+  mutate(component = iris_share * log(iris_share / metro_share)) %>%
+  group_by(UU2020) %>%
+  summarise(income_divergence_index = sum(component, na.rm = TRUE),
+            .groups = "drop")
+```
+
+```{r compute-building-age}
+# ── Building age entropy (mirrors France_DiverseIndex.Rmd) ───────────────────
+building_age_divergence <- iris_df %>%
+  filter(UU2020 %in% top_100_uu$UU2020) %>%
+  mutate(
+    s19 = P21_RP_ACH19 / P21_RP_ACHTOT,
+    s45 = P21_RP_ACH45 / P21_RP_ACHTOT,
+    s70 = P21_RP_ACH70 / P21_RP_ACHTOT,
+    s90 = P21_RP_ACH90 / P21_RP_ACHTOT,
+    s05 = P21_RP_ACH05 / P21_RP_ACHTOT,
+    s18 = P21_RP_ACH18 / P21_RP_ACHTOT
+  ) %>%
+  rowwise() %>%
+  mutate(bldg_entropy = -sum(
+    c(s19, s45, s70, s90, s05, s18) *
+    log(c(s19, s45, s70, s90, s05, s18)),
+    na.rm = TRUE)) %>%
+  ungroup() %>%
+  group_by(UU2020) %>%
+  summarise(building_age_divergence_index = mean(bldg_entropy, na.rm = TRUE),
+            .groups = "drop")
+```
+
+
+----------
+# 2  Figure 1 — Average Income Distribution by Tenure Type
+
+```{r}
+# Join income category to IRIS data
+iris_income <- income_iris %>%
+  select(CODE_IR, income_cat, UU2020) %>%
+  right_join(
+    iris_df %>% select(CODE_IR, tenure_type),
+    by = "CODE_IR"
+  ) %>%
+  filter(!is.na(income_cat))
+
+# For each income_cat × tenure_type: % of IRIS in that tenure type
+fig1_data <- iris_income %>%
+  group_by(income_cat, tenure_type) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(income_cat) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ungroup() %>%
+  mutate(
+    income_cat = factor(
+      income_cat,
+      levels = c("Lower", "Middle", "Higher"),
+      labels = c("Less than €20,000",
+                 "€20,000–€39,999",
+                 "€40,000 or More")
+    )
+  )
+```
+
+```{r}
+fig1 <- ggplot(fig1_data,
+               aes(x = income_cat, y = pct, fill = tenure_type)) +
+  geom_col(position = position_dodge(width = 0.7),
+           width = 0.65, colour = NA) +
+  scale_fill_manual(
+    values = pal_tenure,
+    labels = c("Rental Deserts",
+               "Mixed-Tenure Neighborhoods",
+               "High-Rental Neighborhoods")
+  ) +
+  scale_y_continuous(
+    limits   = c(0, 70),
+    breaks   = seq(0, 60, 20),
+    expand   = expansion(mult = c(0, 0.02))
+  ) +
+  labs(
+    title = "Average Share of IRIS (Percent)",
+    x     = "Household Income (IRIS Median)"
+  ) +
+  theme_bar() +
+  guides(fill = guide_legend(nrow = 1))
+
+fig1
+ggsave(paste0(fig_dir, "Figure1_income_tenure.png"),
+       fig1, width = 6.5, height = 4, dpi = 300, bg = "white")
+```
+
+
+----------
+# 3  Figure 2 — Housing Tenure Divergence Index Across Urban Units
+
+```{r}
+uu_shp <- st_read(path_uu_shp, quiet = TRUE) %>%
+  st_transform(crs = 4326)
+
+# All UUs: grey background; top-100 UUs: coloured by quartile
+uu_map_data <- uu_shp %>%
+  left_join(
+    metro_divergence %>% select(UU2020, div_category),
+    by = c("uu2020" = "UU2020")
+  ) %>%
+  mutate(
+    fill_var = if_else(!is.na(div_category),
+                       as.character(div_category),
+                       "Other urban units")
+  )
+
+# France bounding box (mainland only)
+fr_bbox <- st_bbox(uu_shp)
+```
+
+```{r}
+# The uu2020 shapefile codes don't match UU2020 in the IRIS data (47/100 match).
+# Fix: dissolve IRIS polygon boundaries by u2020_x (= UU2020 in IRIS data)
+# to build UU-level geometries that are guaranteed to use the same codes.
+
+if (!exists("iris_poly")) {
+  iris_poly <- st_read(path_iris_poly, quiet = TRUE) %>%
+    st_transform(crs = 4326)
+}
+
+# Dissolve top-100 IRIS to UU-level polygons (takes ~1 min)
+uu_polygons <- iris_poly %>%
+  filter(u2020_x %in% top_100_uu$UU2020) %>%
+  group_by(u2020_x) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop") %>%
+  left_join(
+    metro_divergence %>% select(UU2020, div_category),
+    by = c("u2020_x" = "UU2020")
+  ) %>%
+  mutate(fill_var = factor(div_category, levels = names(pal_quartile)))
+
+cat("UU polygons built:", nrow(uu_polygons), "\n")
+cat("Categories:\n"); print(table(uu_polygons$fill_var, useNA = "ifany"))
+
+# Grey background: all IRIS not in top-100 UUs
+iris_bg  <- iris_poly %>% filter(!u2020_x %in% top_100_uu$UU2020)
+fr_bbox  <- st_bbox(c(xmin=-5.2, xmax=9.7, ymin=41.2, ymax=51.2), crs=4326)
+```
+
+```{r, include=FALSE}
+# ── Figure 2: Divergence Quartile Map ────────────────────────────────────────
+pal_q2 <- c(
+  "Least Divergent" = "#C6CBEF",
+  "Second Quartile" = "#9BAFD4",
+  "Third Quartile"  = "#756BB1",
+  "Most Divergent"  = "#54278F"
+)
+
+# uu_polygons already has div_category from the dissolve step above —
+# no second join needed. Just split into foreground and background.
+uu_foreground <- uu_polygons %>% filter(!is.na(div_category))
+uu_background <- uu_polygons %>% filter( is.na(div_category))
+
+cat("Coloured UUs:", nrow(uu_foreground), "\n")
+print(table(uu_foreground$div_category))
+
+fig2 <- ggplot() +
+  geom_sf(data = iris_bg,
+          fill  = "#EEEEEE", colour = "gray", linewidth = 0.05) +
+  geom_sf(data = uu_foreground,
+          aes(fill = div_category),
+          colour = "white", linewidth = 0.1) +
+  scale_fill_manual(
+    name   = "Divergence Index\nValue (Quartile)",
+    values = pal_q2,
+    breaks = names(pal_q2),
+    drop   = FALSE
+  ) +
+  coord_sf(
+    xlim   = c(fr_bbox["xmin"], fr_bbox["xmax"]),
+    ylim   = c(fr_bbox["ymin"], fr_bbox["ymax"]),
+    expand = FALSE
+  ) +
+  theme_map()
+
+fig2
+ggsave(paste0(fig_dir, "Figure2_divergence_national.png"),
+       fig2, width = 7.5, height = 5.5, dpi = 300, bg = "white")
+```
+
+-----
+
+```{r}
+# ── Rebuild uu_polygons from ALL UUs (not just top-100) ──────────────────────
+cat("Rebuilding uu_polygons from all UUs...\n")
+
+uu_polygons_all <- iris_poly %>%
+  mutate(UU2020 = as.character(u2020_x)) %>%
+  filter(!is.na(UU2020), UU2020 != "0", UU2020 != "") %>%
+  group_by(UU2020) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop")
+
+cat("Total UU polygons:", nrow(uu_polygons_all), "\n")
+
+# Join divergence category — only top-100 get a colour
+uu_polygons_all <- uu_polygons_all %>%
+  left_join(
+    metro_divergence %>%
+      mutate(UU2020 = as.character(UU2020)) %>%
+      select(UU2020, div_category),
+    by = "UU2020"
+  )
+
+uu_foreground <- uu_polygons_all %>% filter(!is.na(div_category))
+uu_background <- uu_polygons_all %>% filter( is.na(div_category))
+
+cat("Foreground (coloured):", nrow(uu_foreground), "\n")
+cat("Background (grey):    ", nrow(uu_background), "\n")
+print(table(uu_foreground$div_category))
+
+# ── Figure 2 plot ─────────────────────────────────────────────────────────────
+fig2 <- ggplot() +
+  geom_sf(data      = uu_background,
+          fill      = "#EEEEEE", colour = "gray", linewidth = 0.05) +
+  geom_sf(data      = uu_foreground,
+          aes(fill  = div_category),
+          colour    = "white", linewidth = 0.1) +
+  scale_fill_manual(
+    name   = "Divergence Index\nValue (Quartile)",
+    values = pal_q2,
+    breaks = names(pal_q2),
+    drop   = FALSE
+  ) +
+  coord_sf(
+    xlim   = c(fr_bbox["xmin"], fr_bbox["xmax"]),
+    ylim   = c(fr_bbox["ymin"], fr_bbox["ymax"]),
+    expand = FALSE
+  ) +
+  theme_map()
+
+fig2
+ggsave(paste0(fig_dir, "Figure2_divergence_national.png"),
+       fig2, width = 7.5, height = 5.5, dpi = 300, bg = "white")
+```
+
+
+----------
+# 4  Figure 3 — Neighborhood Divergence Type: `r FIGURE3_CITY`
+
+```{r}
+# ── 20 cities list ────────────────────────────────────────────────────────────
+cities_20 <- c(
+  "Le Havre", "Nîmes", "Tours", "Limoges", "Rouen",
+  "Le Mans", "Lille (partie française)", "Brest",
+  "Marseille-Aix-en-Provence", "Paris",
+  "Saint-Cyprien", "Menton-Monaco (partie française)",
+  "La Teste-de-Buch-Arcachon", "Armentières (partie française)",
+  "Fréjus", "Annecy", "Bayonne (partie française)",
+  "Maubeuge (partie française)", "Saint-Just-Saint-Rambert",
+  "Sète"
+)
+
+group_labels <- c(
+  rep("Top 10 — Most Divergent",    10),
+  rep("Bottom 10 — Least Divergent", 10)
+)
+
+# ── Loop ──────────────────────────────────────────────────────────────────────
+walk2(cities_20, group_labels, function(city_name, city_group) {
+
+  # Match lib2020 — use str_detect so partial matches work
+  target_uu <- top_100_uu %>%
+    filter(str_detect(lib2020,
+                      fixed(city_name, ignore_case = TRUE))) %>%
+    pull(UU2020)
+
+  if (length(target_uu) == 0) {
+    cat("⚠ NOT FOUND:", city_name, "— check lib2020 spelling\n")
+    cat("  Closest matches:",
+        paste(grep(substr(city_name, 1, 5),
+                   top_100_uu$lib2020, value = TRUE), collapse = ", "), "\n")
+    return(invisible(NULL))
+  }
+
+  uu_code <- target_uu[1]
+  div_score <- metro_divergence %>%
+    filter(UU2020 == uu_code) %>%
+    pull(avg_divergence_value) %>%
+    round(2)
+
+  cat("Mapping:", city_name, "— UU2020:", uu_code,
+      "— div:", div_score, "\n")
+
+  # IRIS divergence for this city (within-metro quartile)
+  iris_city_div <- divergence_values %>%
+    filter(UU2020 == uu_code) %>%
+    mutate(
+      div_quartile = ntile(divergence_value, 4),
+      iris_type    = case_when(
+        div_quartile == 4 & rental_sh > owner_sh  ~ "Most Divergent,\nHigh Rental",
+        div_quartile == 4 & rental_sh <= owner_sh ~ "Most Divergent,\nHigh Owner",
+        div_quartile < 4  & rental_sh > owner_sh  ~ "Less Divergent,\nHigh Rental",
+        TRUE                                       ~ "Less Divergent,\nHigh Owner"
+      ),
+      iris_type = factor(iris_type, levels = names(pal_iris_type))
+    ) %>%
+    select(CODE_IR, iris_type)
+
+  # Join to polygon geometry
+  iris_city_map <- iris_poly %>%
+    filter(as.character(u2020_x) == uu_code) %>%
+    left_join(iris_city_div, by = "CODE_IR")
+
+  if (nrow(iris_city_map) == 0) {
+    cat("⚠ No IRIS polygons found for:", city_name, "\n")
+    return(invisible(NULL))
+  }
+
+  # Plot — same style as your Figure 3
+  p <- ggplot(iris_city_map) +
+    geom_sf(aes(fill = iris_type), colour = NA, linewidth = 0.05) +
+    scale_fill_manual(
+      name         = "Neighborhood\nDivergence Type",
+      values       = pal_iris_type,
+      na.value     = "#CCCCCC",
+      na.translate = TRUE,
+      drop         = FALSE
+    ) +
+    labs(
+      title    = city_name,
+      subtitle = paste0(city_group, "  |  Divergence index: ", div_score)
+    ) +
+    theme_map(legend_pos = c(0.02, 0.2)) +
+    theme(
+      plot.title    = element_text(size = 14, face = "bold",
+                                   margin = margin(b = 4)),
+      plot.subtitle = element_text(size = 9, color = "grey40",
+                                   margin = margin(b = 6)),
+      plot.margin   = margin(10, 10, 10, 10)
+    )
+
+  # Safe filename
+  safe_name <- city_name %>%
+    str_replace_all("[^a-zA-Z0-9]", "_") %>%
+    str_replace_all("_+", "_") %>%
+    str_remove("_$")
+
+  ggsave(
+    paste0(fig_dir, "Figure3_", safe_name, ".png"),
+    p, width = 8, height = 7, dpi = 300, bg = "white"
+  )
+})
+
+cat("\nDone. Check", fig_dir, "for 20 PNG files.\n")
+```
+
+```{r}
+# How many IRIS does each source find for Paris?
+cat("From iris_poly (Figure 3 loop):\n")
+paris_new <- iris_poly %>% filter(as.character(u2020_x) == "00851")
+cat("  IRIS count:", nrow(paris_new), "\n")
+cat("  bbox:", st_bbox(paris_new), "\n")
+
+# From divergence_values (original Rmd source)
+cat("\nFrom divergence_values:\n")
+paris_old <- divergence_values %>% filter(UU2020 == "00851")
+cat("  IRIS count:", nrow(paris_old), "\n")
+```
+
+
+----------
+# 5  Figure 4 — Housing Tenure × Building Age Segregation
+
+```{r}
+# ── Figure 4: Housing Tenure × Building Age Segregation ──────────────────────
+
+# Step 1: Thresholds
+housing_threshold  <- median(metro_divergence$avg_divergence_value,
+                              na.rm = TRUE)
+building_threshold <- median(building_age_divergence$building_age_divergence_index,
+                              na.rm = TRUE)
+
+# Step 2: Palette — NO \n in names, plain spaces only
+pal_seg_building <- c(
+  "High Housing, High Building Age Segregation" = "#54278F",
+  "High Housing, Low Building Age Segregation"  = "#756BB1",
+  "Low Housing, High Building Age Segregation"  = "#9BAFD4",
+  "Low Housing, Low Building Age Segregation"   = "#C6CBEF"
+)
+
+# Step 3: Classification — names must match palette exactly
+seg_bldg <- metro_divergence %>%
+  left_join(building_age_divergence, by = "UU2020") %>%
+  mutate(
+    seg_type = case_when(
+      is.na(building_age_divergence_index)       ~ NA_character_,
+      avg_divergence_value >= housing_threshold &
+        building_age_divergence_index >= building_threshold ~
+        "High Housing, High Building Age Segregation",
+      avg_divergence_value >= housing_threshold &
+        building_age_divergence_index <  building_threshold ~
+        "High Housing, Low Building Age Segregation",
+      avg_divergence_value <  housing_threshold &
+        building_age_divergence_index >= building_threshold ~
+        "Low Housing, High Building Age Segregation",
+      TRUE ~
+        "Low Housing, Low Building Age Segregation"
+    ),
+    seg_type = factor(seg_type, levels = names(pal_seg_building))
+  )
+
+cat("seg_type distribution:\n")
+print(table(seg_bldg$seg_type, useNA = "ifany"))
+
+# Step 4: Join to uu_polygons (column is UU2020 after the dissolve)
+uu_fig4_map <- uu_polygons %>%
+  mutate(UU2020 = as.character(UU2020)) %>%
+  left_join(
+    seg_bldg %>%
+      mutate(UU2020 = as.character(UU2020)) %>%
+      select(UU2020, seg_type),
+    by = "UU2020"
+  )
+
+cat("Non-NA seg_type:", sum(!is.na(uu_fig4_map$seg_type)),
+    "/ 100 expected\n")
+print(table(uu_fig4_map$seg_type, useNA = "ifany"))
+
+# Step 5: Plot — same style as Figure 2
+fig4 <- ggplot() +
+  geom_sf(data  = filter(uu_fig4_map,  is.na(seg_type)),
+          fill  = "#EEEEEE", colour = "gray", linewidth = 0.05) +
+  geom_sf(data  = filter(uu_fig4_map, !is.na(seg_type)),
+          aes(fill = seg_type),
+          colour = "white", linewidth = 0.1) +
+  scale_fill_manual(
+    name     = "Segregation Type",
+    values   = pal_seg_building,
+    na.value = "#EEEEEE",
+    drop     = FALSE
+  ) +
+  coord_sf(
+    xlim   = c(fr_bbox["xmin"], fr_bbox["xmax"]),
+    ylim   = c(fr_bbox["ymin"], fr_bbox["ymax"]),
+    expand = FALSE
+  ) +
+  theme_map()
+
+fig4
+ggsave(paste0(fig_dir, "Figure4_housing_building_age_seg.png"),
+       fig4, width = 7.5, height = 5.5, dpi = 300, bg = "white")
+```
+
+
+----------
+# 6  Figure 5 — Housing Tenure × Income Segregation
+
+```{r}
+# ── Income divergence — recomputed from full income file (100 UUs) ────────────
+income_full <- read_csv(
+  paste0(base_path, "Updated_France_Rental_with_Income.csv"),
+  locale         = locale(encoding = "latin1"),
+  show_col_types = FALSE
+) %>%
+  rename(CODE_IR = IRIS) %>%
+  mutate(
+    UU2020    = as.character(UU2020),
+    DEC_MED21 = as.numeric(DEC_MED21)
+  )
+
+income_top100 <- income_full %>%
+  filter(
+    UU2020 %in% top_100_uu$UU2020,
+    !is.na(DEC_MED21)
+  ) %>%
+  mutate(
+    income_cat = case_when(
+      DEC_MED21 <  20000 ~ "Lower",
+      DEC_MED21 <  40000 ~ "Middle",
+      TRUE               ~ "Higher"
+    )
+  )
+
+cat("IRIS with income data:", nrow(income_top100), "\n")
+cat("UUs represented:",       n_distinct(income_top100$UU2020), "\n")
+
+income_shares <- income_top100 %>%
+  group_by(UU2020, income_cat) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(UU2020) %>%
+  mutate(iris_share = count / sum(count)) %>%
+  ungroup()
+
+metro_income_ref <- income_shares %>%
+  group_by(income_cat) %>%
+  summarise(metro_share = mean(iris_share, na.rm = TRUE), .groups = "drop")
+
+income_divergence <- income_shares %>%
+  left_join(metro_income_ref, by = "income_cat") %>%
+  mutate(component = iris_share * log(iris_share / metro_share)) %>%
+  group_by(UU2020) %>%
+  summarise(
+    income_divergence_index = sum(component, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("Income divergence computed for", nrow(income_divergence), "UUs\n")
+```
+
+```{r}
+# ── Figure 5: Housing Tenure × Income Segregation ────────────────────────────
+
+# Step 1: Palette — plain spaces, no \n
+pal_seg_income <- c(
+  "High Housing, High Income Segregation" = "#54278F",
+  "High Housing, Low Income Segregation"  = "#756BB1",
+  "Low Housing, High Income Segregation"  = "#9BAFD4",
+  "Low Housing, Low Income Segregation"   = "#C6CBEF"
+)
+
+# Step 2: Threshold + classification
+income_threshold <- median(income_divergence$income_divergence_index,
+                            na.rm = TRUE)
+
+seg_income <- metro_divergence %>%
+  left_join(income_divergence, by = "UU2020") %>%
+  mutate(
+    seg_type = case_when(
+      is.na(income_divergence_index)             ~ NA_character_,
+      avg_divergence_value >= housing_threshold &
+        income_divergence_index >= income_threshold ~
+        "High Housing, High Income Segregation",
+      avg_divergence_value >= housing_threshold &
+        income_divergence_index <  income_threshold ~
+        "High Housing, Low Income Segregation",
+      avg_divergence_value <  housing_threshold &
+        income_divergence_index >= income_threshold ~
+        "Low Housing, High Income Segregation",
+      TRUE ~
+        "Low Housing, Low Income Segregation"
+    ),
+    seg_type = factor(seg_type, levels = names(pal_seg_income))
+  )
+
+cat("seg_type distribution:\n")
+print(table(seg_income$seg_type, useNA = "ifany"))
+
+# Step 3: Join to uu_polygons
+uu_fig5_map <- uu_polygons %>%
+  mutate(UU2020 = as.character(UU2020)) %>%
+  left_join(
+    seg_income %>%
+      mutate(UU2020 = as.character(UU2020)) %>%
+      select(UU2020, seg_type),
+    by = "UU2020"
+  )
+
+cat("Non-NA seg_type:", sum(!is.na(uu_fig5_map$seg_type)),
+    "/ 100 expected\n")
+print(table(uu_fig5_map$seg_type, useNA = "ifany"))
+
+# Step 4: Plot — identical structure to Figures 2 and 4
+fig5 <- ggplot() +
+  geom_sf(data  = filter(uu_fig5_map,  is.na(seg_type)),
+          fill  = "#EEEEEE", colour = "gray", linewidth = 0.05) +
+  geom_sf(data  = filter(uu_fig5_map, !is.na(seg_type)),
+          aes(fill = seg_type),
+          colour = "white", linewidth = 0.1) +
+  scale_fill_manual(
+    name     = "Segregation Type",
+    values   = pal_seg_income,
+    na.value = "#EEEEEE",
+    drop     = FALSE
+  ) +
+  coord_sf(
+    xlim   = c(fr_bbox["xmin"], fr_bbox["xmax"]),
+    ylim   = c(fr_bbox["ymin"], fr_bbox["ymax"]),
+    expand = FALSE
+  ) +
+  theme_map()
+
+fig5
+ggsave(paste0(fig_dir, "Figure5_housing_income_seg.png"),
+       fig5, width = 7.5, height = 5.5, dpi = 300, bg = "white")
+```
+
+```{r}
+cat("=== seg_income (data frame — before spatial join) ===\n")
+cat("Total rows:", nrow(seg_income), "\n")
+print(table(seg_income$seg_type, useNA = "ifany"))
+
+cat("\n=== uu_fig5_map (after spatial join to uu_polygons) ===\n")
+cat("Total UU polygons:", nrow(uu_fig5_map), "\n")
+print(table(uu_fig5_map$seg_type, useNA = "ifany"))
+
+cat("\nColoured (non-NA):", sum(!is.na(uu_fig5_map$seg_type)), "\n")
+cat("Grey (NA)        :", sum( is.na(uu_fig5_map$seg_type)), "\n")
+```
+
+
+---
+
+# 7  Saved files summary
+
+```{r eval=FALSE, include=FALSE}
+saved <- list.files(fig_dir, pattern = "\\.png$", full.names = FALSE)
+cat("Figures saved to:", fig_dir, "\n\n")
+for (f in saved) cat(" ·", f, "\n")
+```
+
+---
+
+# Notes on French adaptations
+
+| Reference figure | French adaptation | Reason |
+|---|---|---|
+| Fig 1 — household income brackets ($) | IRIS classified by median income (DEC_MED21): <€20k / €20–40k / ≥€40k | French income data is IRIS-level median, not household counts by bracket |
+| Fig 2 — CBSA divergence map | UU2020 divergence map (top 100 by population) | Urban Units are the French CBSA equivalent |
+| Fig 3 — single metro IRIS map | Same structure; default city = Paris | Change `FIGURE3_CITY` at top to any lib2020 name |
+| Fig 4 — housing × **racial** segregation | Housing × **building age entropy** | France does not collect race/ethnicity in the census; building age entropy is a validated housing diversity proxy used in the existing Rmd |
+| Fig 5 — housing × income segregation | Same; income divergence from DEC_MED21 | Direct equivalent |
+
+
+
+

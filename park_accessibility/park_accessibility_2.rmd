@@ -1,0 +1,61 @@
+---
+title: "Untitled"
+author: "dawon"
+date: "2026-10-05"
+output: html_document
+---
+
+```{r}
+library(lme4); library(lmerTest)
+
+out_dir <- "C:/Users/ohdaw/OneDrive - Harvard University/snu_remains/redo/ccrem_rerun"
+dl <- read.csv(file.path(out_dir, "data_long_for_R.csv"))
+dl$ID        <- factor(dl$ID)
+dl$INFLOW_CD <- factor(dl$INFLOW_CD)
+fml <- readLines(file.path(out_dir, "formulas.txt"))
+```
+
+```{r}
+ctrl <- lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+fit  <- lmer(as.formula(fml[1]), data = dl, weights = w, REML = TRUE, control = ctrl)
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+print(isSingular(fit)); print(VarCorr(fit)); print(summary(rePCA(fit)))
+print(VarCorr(fit)); print(summary(rePCA(fit)))
+# Optimizer check
+fit_nm <- update(fit, control = lmerControl(optimizer = "Nelder_Mead", optCtrl = list(maxfun = 2e5)))
+cat("Max abs diff in fixed effects:", max(abs(fixef(fit) - fixef(fit_nm))), "\n")
+cat("logLik BOBYQA:", logLik(fit), " | Nelder-Mead:", logLik(fit_nm), "\n")
+
+# LR test for Female x Age and Female x Age^2
+fit_noFA <- lmer(as.formula(fml[2]), data = dl, weights = w, REML = TRUE, control = ctrl)
+lrt <- anova(fit_noFA, fit)
+print(lrt)
+write.csv(as.data.frame(lrt), file.path(out_dir, "lrt_female_age.csv"))
+
+# Save results for Python
+coefs <- as.data.frame(summary(fit)$coefficients)
+coefs$term <- rownames(coefs)
+write.csv(coefs, file.path(out_dir, "ccrem_coefficients_raw.csv"), row.names = FALSE)
+write.csv(as.matrix(vcov(fit)), file.path(out_dir, "ccrem_vcov.csv"))
+
+vc <- as.data.frame(VarCorr(fit))
+var_f   <- var(as.vector(model.matrix(fit) %*% fixef(fit)))
+var_id  <- vc$vcov[vc$grp == "ID"]
+var_org <- vc$vcov[vc$grp == "INFLOW_CD"]
+var_res <- sigma(fit)^2
+tot <- var_f + var_id + var_org + var_res
+fitstats <- data.frame(
+  quantity = c("Park (ID) intercept variance", "Origin gu (INFLOW_CD) intercept variance",
+               "Residual variance", "ICC park", "ICC origin",
+               "Marginal R2", "Conditional R2", "AIC", "BIC", "logLik",
+               "N obs", "N parks", "N origin gu"),
+  value = c(var_id, var_org, var_res,
+            var_id / (var_id + var_org + var_res), var_org / (var_id + var_org + var_res),
+            var_f / tot, (var_f + var_id + var_org) / tot,
+            AIC(fit), BIC(fit), as.numeric(logLik(fit)),
+            nobs(fit), nlevels(dl$ID), nlevels(dl$INFLOW_CD)))
+write.csv(fitstats, file.path(out_dir, "ccrem_fit_stats.csv"), row.names = FALSE)
+cat("Done\n")
+```
+
